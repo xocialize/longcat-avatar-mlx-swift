@@ -101,6 +101,22 @@ a header comment with:
 - A summary of the module's architecture
 - An explicit `TODO(S3.x)` checklist of what's left
 
+## Running tests
+
+```bash
+# Recommended: run via xcodebuild (bundles default.metallib correctly)
+xcodebuild test \
+    -scheme LongCatVideoAvatar-Package \
+    -destination "platform=macOS"
+```
+
+> **Heads-up:** `swift test` from the CLI does NOT bundle MLX's Metal shader
+> library — the test binary crashes on first MLX kernel dispatch with
+> "Failed to load the default metallib library not found". This is a known
+> mlx-swift limitation with SwiftPM's CLI build path on macOS. Xcode's build
+> system handles the resource compile correctly; `xcodebuild test` is the
+> supported path.
+
 ## Companion Python port
 
 [xocialize/longcat-avatar-mlx](https://github.com/xocialize/longcat-avatar-mlx)
