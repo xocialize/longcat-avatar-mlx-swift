@@ -1,0 +1,38 @@
+{
+  "generator": "longcat-avatar-mlx/scripts/dump_umt5_swift_fixtures.py",
+  "source_weights": "mlx-community/LongCat-Video-Avatar-1.5-bf16-dmd-merged",
+  "seed": 42,
+  "shapes": {
+    "input_ids": [
+      1,
+      16
+    ],
+    "input_mask": [
+      1,
+      16
+    ],
+    "output": [
+      1,
+      16,
+      4096
+    ]
+  },
+  "vocab_size": 256384,
+  "files": {
+    "input_ids.npy": {
+      "sha256_16": "a0ede63c94f83c5c"
+    },
+    "input_mask.npy": {
+      "sha256_16": "dedf2ef5ad58a6d0"
+    },
+    "output.npy": {
+      "sha256_16": "46050a8e5a005301"
+    }
+  },
+  "thresholds": {
+    "# Swift-MLX vs Python-MLX": null,
+    "# Python-MLX vs PT is < 1e-3 per tests/parity/test_umt5_parity.py": null,
+    "# We target 1e-4 here (fp32-rounding-only divergence between runtimes).": null,
+    "output_max_abs": 0.0001
+  }
+}
