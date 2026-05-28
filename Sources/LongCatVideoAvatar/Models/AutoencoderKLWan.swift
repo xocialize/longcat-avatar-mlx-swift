@@ -453,20 +453,586 @@ public final class WanFeatIdxRef: @unchecked Sendable {
 }
 
 // =============================================================================
-// TODO(S3.3b): composite blocks + encoder/decoder + top-level AutoencoderKLWan
+// Composite blocks (S3.3b) — match diffusers' WanResidualBlock /
+// WanMidBlock / WanUpBlock. The "down stage" in the encoder is a FLAT
+// list mixing residual blocks, optional attention, and resamples
+// (per the Wan 2.1 `is_residual=False` schema) — kept as `[any Module]`
+// rather than wrapped in a "DownBlock" class to mirror the Python port.
 // =============================================================================
-//
-// The remaining work (lands as a follow-up PR per the staged-port discipline):
-//
-//   ☐ WanResidualBlock        (norm1, conv1, norm2, conv2, conv_shortcut?)
-//   ☐ WanMidBlock             ([resnet, attn, resnet])
-//   ☐ WanUpBlock              (resnets[..R] + optional upsamplers[0])
-//   ☐ WanEncoder3d            (conv_in + flat down_blocks + mid_block + norm/conv_out)
-//   ☐ WanDecoder3d            (conv_in + mid_block + nested up_blocks + norm/conv_out)
-//   ☐ AutoencoderKLWan        (encoder + quant_conv + post_quant_conv + decoder,
-//                              encode(), decode(), normalizeLatents(), denormalizeLatents())
-//   ☐ fromPretrained(repoID:) using WeightLoader (S3.2 land)
-//   ☐ Parity test against the Python port's reference .npy outputs:
-//     - encode max_abs < 1e-3
-//     - decode max_abs < 5e-2
-//
+
+/// ResNet block with named `norm1` / `conv1` / `norm2` / `conv2` /
+/// `convShortcut?` fields. Matches diffusers' `WanResidualBlock`.
+public final class WanResidualBlock: Module, @unchecked Sendable {
+    public let inDim: Int
+    public let outDim: Int
+
+    public let norm1: WanRMSNorm
+    public let conv1: CausalConv3d
+    public let norm2: WanRMSNorm
+    public let conv2: CausalConv3d
+    /// `nil` when `inDim == outDim` (matches PT's `nn.Identity()` slot).
+    public let convShortcut: CausalConv3d?
+
+    public init(inDim: Int, outDim: Int) {
+        self.inDim = inDim
+        self.outDim = outDim
+
+        self.norm1 = WanRMSNorm(dim: inDim, images: false)
+        self.conv1 = CausalConv3d(inputChannels: inDim, outputChannels: outDim, kernelSize: 3, padding: 1)
+        self.norm2 = WanRMSNorm(dim: outDim, images: false)
+        self.conv2 = CausalConv3d(inputChannels: outDim, outputChannels: outDim, kernelSize: 3, padding: 1)
+        self.convShortcut = (inDim != outDim)
+            ? CausalConv3d(inputChannels: inDim, outputChannels: outDim, kernelSize: 1)
+            : nil
+        super.init()
+    }
+
+    public func callAsFunction(
+        _ x: MLXArray,
+        featCache: WanFeatCacheRef? = nil,
+        featIdx: WanFeatIdxRef? = nil
+    ) -> MLXArray {
+        let h = (convShortcut == nil) ? x : convShortcut!(x)
+
+        var y = silu(norm1(x))
+        if let featCache, let featIdx {
+            let idx = featIdx.value
+            var cacheX = y[0..., 0..., (max(0, y.dim(2) - WanVAECacheT))...]
+            if cacheX.dim(2) < WanVAECacheT, case .tensor(let cached) = featCache.slot(at: idx) {
+                cacheX = concatenated([cached[0..., 0..., (cached.dim(2) - 1)...], cacheX], axis: 2)
+            }
+            switch featCache.slot(at: idx) {
+            case .tensor(let cached):
+                y = conv1(y, cacheX: cached)
+            case .empty, .rep:
+                y = conv1(y)
+            }
+            featCache.set(.tensor(cacheX), at: idx)
+            featIdx.advance()
+        } else {
+            y = conv1(y)
+        }
+
+        y = silu(norm2(y))
+        if let featCache, let featIdx {
+            let idx = featIdx.value
+            var cacheX = y[0..., 0..., (max(0, y.dim(2) - WanVAECacheT))...]
+            if cacheX.dim(2) < WanVAECacheT, case .tensor(let cached) = featCache.slot(at: idx) {
+                cacheX = concatenated([cached[0..., 0..., (cached.dim(2) - 1)...], cacheX], axis: 2)
+            }
+            switch featCache.slot(at: idx) {
+            case .tensor(let cached):
+                y = conv2(y, cacheX: cached)
+            case .empty, .rep:
+                y = conv2(y)
+            }
+            featCache.set(.tensor(cacheX), at: idx)
+            featIdx.advance()
+        } else {
+            y = conv2(y)
+        }
+
+        return y + h
+    }
+}
+
+/// Middle block: `[resnet, attn, resnet, attn, resnet, …]` — alternating,
+/// always starting and ending with a resnet. `num_layers=N` adds N
+/// attention/resnet pairs after the leading resnet (so total: 1 + 2N
+/// modules). Matches diffusers' `WanMidBlock`.
+public final class WanMidBlock: Module, @unchecked Sendable {
+    public let resnets: [WanResidualBlock]
+    public let attentions: [WanAttentionBlock]
+
+    public init(dim: Int, numLayers: Int = 1) {
+        var rs = [WanResidualBlock(inDim: dim, outDim: dim)]
+        var atts: [WanAttentionBlock] = []
+        for _ in 0..<numLayers {
+            atts.append(WanAttentionBlock(dim: dim))
+            rs.append(WanResidualBlock(inDim: dim, outDim: dim))
+        }
+        self.resnets = rs
+        self.attentions = atts
+        super.init()
+    }
+
+    public func callAsFunction(
+        _ x: MLXArray,
+        featCache: WanFeatCacheRef? = nil,
+        featIdx: WanFeatIdxRef? = nil
+    ) -> MLXArray {
+        var y = resnets[0](x, featCache: featCache, featIdx: featIdx)
+        for i in 0..<attentions.count {
+            y = attentions[i](y)
+            y = resnets[i + 1](y, featCache: featCache, featIdx: featIdx)
+        }
+        return y
+    }
+}
+
+/// Decoder up-stage. `resnets[..R+1]` followed by an optional
+/// `upsamplers[0]` (matches Python — Python uses `resnets` as the
+/// public attribute name + `upsamplers` as a 1-element list).
+public final class WanUpBlock: Module, @unchecked Sendable {
+    public let resnets: [WanResidualBlock]
+    public let upsamplers: [WanResample]?
+
+    public init(inDim: Int, outDim: Int, numResBlocks: Int, upsampleMode: String?) {
+        var rs: [WanResidualBlock] = []
+        var current = inDim
+        for _ in 0..<(numResBlocks + 1) {
+            rs.append(WanResidualBlock(inDim: current, outDim: outDim))
+            current = outDim
+        }
+        self.resnets = rs
+        self.upsamplers = upsampleMode.map { [WanResample(dim: outDim, mode: $0)] }
+        super.init()
+    }
+
+    public func callAsFunction(
+        _ x: MLXArray,
+        featCache: WanFeatCacheRef? = nil,
+        featIdx: WanFeatIdxRef? = nil
+    ) -> MLXArray {
+        var y = x
+        for r in resnets {
+            y = r(y, featCache: featCache, featIdx: featIdx)
+        }
+        if let ups = upsamplers, let head = ups.first {
+            y = head(y, featCache: featCache, featIdx: featIdx)
+        }
+        return y
+    }
+}
+
+// =============================================================================
+// Encoder / Decoder
+// =============================================================================
+
+/// Tagged union for the encoder's flat down-blocks list. Python uses a
+/// `list` of mixed types; Swift needs an enum to keep typing tight while
+/// still preserving the in-order mixed iteration.
+public enum WanDownLayer {
+    case residual(WanResidualBlock)
+    case attention(WanAttentionBlock)
+    case resample(WanResample)
+}
+
+/// 3D VAE Encoder. Matches diffusers' `WanEncoder3d` with `is_residual=false`.
+public final class WanEncoder3d: Module, @unchecked Sendable {
+    public let convIn: CausalConv3d
+    public let downBlocks: [WanDownLayer]
+    public let midBlock: WanMidBlock
+    public let normOut: WanRMSNorm
+    public let convOut: CausalConv3d
+
+    public init(
+        inChannels: Int = 3,
+        dim: Int = 96,
+        zDim: Int = 16,
+        dimMult: [Int]? = nil,
+        numResBlocks: Int = 2,
+        attnScales: [Float] = [],
+        temperalDownsample: [Bool]? = nil
+    ) {
+        let mults = dimMult ?? [1, 2, 4, 4]
+        let tempDown = temperalDownsample ?? [false, true, true]
+        let dims = [dim] + mults.map { dim * $0 }
+        var scale: Float = 1.0
+
+        self.convIn = CausalConv3d(inputChannels: inChannels, outputChannels: dims[0], kernelSize: 3, padding: 1)
+
+        var blocks: [WanDownLayer] = []
+        var outDim = dims[0]
+        for i in 0..<(dims.count - 1) {
+            var inD = dims[i]
+            let outD = dims[i + 1]
+            for _ in 0..<numResBlocks {
+                blocks.append(.residual(WanResidualBlock(inDim: inD, outDim: outD)))
+                if attnScales.contains(scale) {
+                    blocks.append(.attention(WanAttentionBlock(dim: outD)))
+                }
+                inD = outD
+            }
+            if i != mults.count - 1 {
+                let mode = tempDown[i] ? "downsample3d" : "downsample2d"
+                blocks.append(.resample(WanResample(dim: outD, mode: mode)))
+                scale /= 2.0
+            }
+            outDim = outD
+        }
+        self.downBlocks = blocks
+
+        self.midBlock = WanMidBlock(dim: outDim, numLayers: 1)
+        self.normOut = WanRMSNorm(dim: outDim, images: false)
+        self.convOut = CausalConv3d(inputChannels: outDim, outputChannels: zDim, kernelSize: 3, padding: 1)
+        super.init()
+    }
+
+    public func callAsFunction(
+        _ x: MLXArray,
+        featCache: WanFeatCacheRef? = nil,
+        featIdx: WanFeatIdxRef? = nil
+    ) -> MLXArray {
+        var y = x
+
+        // ----- conv_in (cache-aware) -----
+        if let featCache, let featIdx {
+            let idx = featIdx.value
+            var cacheX = y[0..., 0..., (max(0, y.dim(2) - WanVAECacheT))...]
+            if cacheX.dim(2) < WanVAECacheT, case .tensor(let cached) = featCache.slot(at: idx) {
+                cacheX = concatenated([cached[0..., 0..., (cached.dim(2) - 1)...], cacheX], axis: 2)
+            }
+            switch featCache.slot(at: idx) {
+            case .tensor(let cached): y = convIn(y, cacheX: cached)
+            case .empty, .rep:        y = convIn(y)
+            }
+            featCache.set(.tensor(cacheX), at: idx)
+            featIdx.advance()
+        } else {
+            y = convIn(y)
+        }
+
+        // ----- down blocks -----
+        for layer in downBlocks {
+            switch layer {
+            case .residual(let r):
+                y = r(y, featCache: featCache, featIdx: featIdx)
+            case .attention(let a):
+                y = a(y)   // no cache plumbing — attention is stateless per-frame
+            case .resample(let s):
+                y = s(y, featCache: featCache, featIdx: featIdx)
+            }
+        }
+
+        y = midBlock(y, featCache: featCache, featIdx: featIdx)
+
+        y = silu(normOut(y))
+        if let featCache, let featIdx {
+            let idx = featIdx.value
+            var cacheX = y[0..., 0..., (max(0, y.dim(2) - WanVAECacheT))...]
+            if cacheX.dim(2) < WanVAECacheT, case .tensor(let cached) = featCache.slot(at: idx) {
+                cacheX = concatenated([cached[0..., 0..., (cached.dim(2) - 1)...], cacheX], axis: 2)
+            }
+            switch featCache.slot(at: idx) {
+            case .tensor(let cached): y = convOut(y, cacheX: cached)
+            case .empty, .rep:        y = convOut(y)
+            }
+            featCache.set(.tensor(cacheX), at: idx)
+            featIdx.advance()
+        } else {
+            y = convOut(y)
+        }
+        return y
+    }
+}
+
+/// 3D VAE Decoder. Matches diffusers' `WanDecoder3d` with `is_residual=false`.
+public final class WanDecoder3d: Module, @unchecked Sendable {
+    public let convIn: CausalConv3d
+    public let midBlock: WanMidBlock
+    public let upBlocks: [WanUpBlock]
+    public let normOut: WanRMSNorm
+    public let convOut: CausalConv3d
+
+    public init(
+        outChannels: Int = 3,
+        dim: Int = 96,
+        zDim: Int = 16,
+        dimMult: [Int]? = nil,
+        numResBlocks: Int = 2,
+        temperalUpsample: [Bool]? = nil
+    ) {
+        let mults = dimMult ?? [1, 2, 4, 4]
+        let tempUp = temperalUpsample ?? [true, true, false]
+
+        // dims = [dim*mults.last, dim*mults.reversed()...]
+        let reversedMults = Array(mults.reversed())
+        let dims = [dim * mults.last!] + reversedMults.map { dim * $0 }
+
+        self.convIn = CausalConv3d(inputChannels: zDim, outputChannels: dims[0], kernelSize: 3, padding: 1)
+        self.midBlock = WanMidBlock(dim: dims[0], numLayers: 1)
+
+        var ups: [WanUpBlock] = []
+        var outDim = dims[0]
+        for i in 0..<(dims.count - 1) {
+            var inD = dims[i]
+            let outD = dims[i + 1]
+            // Wan 2.1: starting from stage 1, the previous upsample halves channels
+            if i > 0 { inD = inD / 2 }
+            let upFlag = (i != mults.count - 1)
+            let mode: String? = upFlag ? (tempUp[i] ? "upsample3d" : "upsample2d") : nil
+            ups.append(WanUpBlock(
+                inDim: inD, outDim: outD, numResBlocks: numResBlocks, upsampleMode: mode
+            ))
+            outDim = outD
+        }
+        self.upBlocks = ups
+
+        self.normOut = WanRMSNorm(dim: outDim, images: false)
+        self.convOut = CausalConv3d(inputChannels: outDim, outputChannels: outChannels, kernelSize: 3, padding: 1)
+        super.init()
+    }
+
+    public func callAsFunction(
+        _ x: MLXArray,
+        featCache: WanFeatCacheRef? = nil,
+        featIdx: WanFeatIdxRef? = nil
+    ) -> MLXArray {
+        var y = x
+
+        // ----- conv_in -----
+        if let featCache, let featIdx {
+            let idx = featIdx.value
+            var cacheX = y[0..., 0..., (max(0, y.dim(2) - WanVAECacheT))...]
+            if cacheX.dim(2) < WanVAECacheT, case .tensor(let cached) = featCache.slot(at: idx) {
+                cacheX = concatenated([cached[0..., 0..., (cached.dim(2) - 1)...], cacheX], axis: 2)
+            }
+            switch featCache.slot(at: idx) {
+            case .tensor(let cached): y = convIn(y, cacheX: cached)
+            case .empty, .rep:        y = convIn(y)
+            }
+            featCache.set(.tensor(cacheX), at: idx)
+            featIdx.advance()
+        } else {
+            y = convIn(y)
+        }
+
+        y = midBlock(y, featCache: featCache, featIdx: featIdx)
+        for up in upBlocks {
+            y = up(y, featCache: featCache, featIdx: featIdx)
+        }
+
+        y = silu(normOut(y))
+        if let featCache, let featIdx {
+            let idx = featIdx.value
+            var cacheX = y[0..., 0..., (max(0, y.dim(2) - WanVAECacheT))...]
+            if cacheX.dim(2) < WanVAECacheT, case .tensor(let cached) = featCache.slot(at: idx) {
+                cacheX = concatenated([cached[0..., 0..., (cached.dim(2) - 1)...], cacheX], axis: 2)
+            }
+            switch featCache.slot(at: idx) {
+            case .tensor(let cached): y = convOut(y, cacheX: cached)
+            case .empty, .rep:        y = convOut(y)
+            }
+            featCache.set(.tensor(cacheX), at: idx)
+            featIdx.advance()
+        } else {
+            y = convOut(y)
+        }
+        return y
+    }
+}
+
+// =============================================================================
+// Top-level AutoencoderKLWan
+// =============================================================================
+
+/// Meituan-style `vae/config.json`.
+public struct WanVAEConfig: Codable, Sendable {
+    public var zDim: Int = 16
+    public var baseDim: Int = 96
+    public var dimMult: [Int]? = nil
+    public var numResBlocks: Int = 2
+    public var attnScales: [Float]? = nil
+    public var temperalDownsample: [Bool]? = nil
+    public var latentsMean: [Float]? = nil
+    public var latentsStd: [Float]? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case zDim = "z_dim"
+        case baseDim = "base_dim"
+        case dimMult = "dim_mult"
+        case numResBlocks = "num_res_blocks"
+        case attnScales = "attn_scales"
+        case temperalDownsample = "temperal_downsample"  // [sic] — upstream typo preserved
+        case latentsMean = "latents_mean"
+        case latentsStd = "latents_std"
+    }
+
+    public init() {}
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        zDim = try c.decodeIfPresent(Int.self, forKey: .zDim) ?? 16
+        baseDim = try c.decodeIfPresent(Int.self, forKey: .baseDim) ?? 96
+        dimMult = try c.decodeIfPresent([Int].self, forKey: .dimMult)
+        numResBlocks = try c.decodeIfPresent(Int.self, forKey: .numResBlocks) ?? 2
+        attnScales = try c.decodeIfPresent([Float].self, forKey: .attnScales)
+        temperalDownsample = try c.decodeIfPresent([Bool].self, forKey: .temperalDownsample)
+        latentsMean = try c.decodeIfPresent([Float].self, forKey: .latentsMean)
+        latentsStd = try c.decodeIfPresent([Float].self, forKey: .latentsStd)
+    }
+}
+
+public final class AutoencoderKLWan: Module, @unchecked Sendable {
+    public let zDim: Int
+    public let mean: MLXArray
+    public let std: MLXArray
+    public let invStd: MLXArray
+
+    // Decoder side: always present
+    public let decoder: WanDecoder3d
+    public let postQuantConv: CausalConv3d
+
+    // Encoder side: optional (decoder-only init for inference-as-decoder)
+    public let encoder: WanEncoder3d?
+    public let quantConv: CausalConv3d?
+
+    public init(config: WanVAEConfig = .init(), includeEncoder: Bool = true) {
+        let zDim = config.zDim
+        let baseDim = config.baseDim
+        let dimMult = config.dimMult ?? [1, 2, 4, 4]
+        let numResBlocks = config.numResBlocks
+        let attnScales = config.attnScales ?? []
+        let tempDown = config.temperalDownsample ?? [false, true, true]
+        let latentsMean = config.latentsMean ?? DefaultVAEMean
+        let latentsStd = config.latentsStd ?? DefaultVAEStd
+
+        self.zDim = zDim
+        self.mean = MLXArray(latentsMean)
+        let stdArr = MLXArray(latentsStd)
+        self.std = stdArr
+        self.invStd = MLXArray(Float(1.0)) / stdArr
+
+        let tempUp = Array(tempDown.reversed())
+        self.decoder = WanDecoder3d(
+            outChannels: 3, dim: baseDim, zDim: zDim, dimMult: dimMult,
+            numResBlocks: numResBlocks, temperalUpsample: tempUp
+        )
+        self.postQuantConv = CausalConv3d(inputChannels: zDim, outputChannels: zDim, kernelSize: 1)
+
+        if includeEncoder {
+            self.encoder = WanEncoder3d(
+                inChannels: 3, dim: baseDim, zDim: zDim * 2, dimMult: dimMult,
+                numResBlocks: numResBlocks, attnScales: attnScales,
+                temperalDownsample: tempDown
+            )
+            self.quantConv = CausalConv3d(inputChannels: zDim * 2, outputChannels: zDim * 2, kernelSize: 1)
+        } else {
+            self.encoder = nil
+            self.quantConv = nil
+        }
+        super.init()
+    }
+
+    // MARK: - normalize / denormalize
+
+    public func normalizeLatents(_ mu: MLXArray) -> MLXArray {
+        let m = mean.reshaped(1, -1, 1, 1, 1)
+        let i = invStd.reshaped(1, -1, 1, 1, 1)
+        return (mu - m) * i
+    }
+
+    public func denormalizeLatents(_ z: MLXArray) -> MLXArray {
+        let m = mean.reshaped(1, -1, 1, 1, 1)
+        let i = invStd.reshaped(1, -1, 1, 1, 1)
+        return z / i + m
+    }
+
+    // MARK: - cache slot counts
+
+    /// Count CausalConv3d slots that participate in the chunked-encode cache.
+    public func countEncoderCacheSlots() -> Int {
+        guard let encoder else { return 0 }
+        var n = 1  // conv_in
+        for layer in encoder.downBlocks {
+            switch layer {
+            case .residual: n += 2
+            case .resample(let r) where r.mode == "downsample3d": n += 1
+            default: break
+            }
+        }
+        for _ in encoder.midBlock.resnets { n += 2 }
+        n += 1  // conv_out
+        return n
+    }
+
+    /// Count CausalConv3d slots that participate in the chunked-decode cache.
+    public func countDecoderCacheSlots() -> Int {
+        var n = 1  // conv_in
+        for _ in decoder.midBlock.resnets { n += 2 }
+        for up in decoder.upBlocks {
+            for _ in up.resnets { n += 2 }
+            if let head = up.upsamplers?.first, head.mode == "upsample3d" {
+                n += 1
+            }
+        }
+        n += 1  // conv_out
+        return n
+    }
+
+    // MARK: - encode / decode
+
+    /// Video `[B, 3, T, H, W]` in `[-1, 1]` → raw latent mean
+    /// `[B, zDim, T_lat, H_lat, W_lat]`. Call `normalizeLatents` before
+    /// feeding the DiT.
+    public func encode(_ x: MLXArray) -> MLXArray {
+        guard let encoder, let quantConv else {
+            fatalError("encode() called on decoder-only AutoencoderKLWan; reconstruct with includeEncoder: true")
+        }
+        let slots = countEncoderCacheSlots()
+        let featCache = WanFeatCacheRef(slotCount: slots)
+
+        let t = x.dim(2)
+        let numChunks = 1 + (t - 1) / 4
+
+        var out: MLXArray? = nil
+        for i in 0..<numChunks {
+            let featIdx = WanFeatIdxRef()
+            let chunk: MLXArray
+            if i == 0 {
+                chunk = x[0..., 0..., 0..<1]
+            } else {
+                chunk = x[0..., 0..., (1 + 4 * (i - 1))..<(1 + 4 * i)]
+            }
+            let cOut = encoder(chunk, featCache: featCache, featIdx: featIdx)
+            out = (out == nil) ? cOut : concatenated([out!, cOut], axis: 2)
+        }
+        let pre = quantConv(out!)
+        let parts = MLX.split(pre, parts: 2, axis: 1)
+        return parts[0]   // mu; discard logvar
+    }
+
+    /// Raw (post-denormalization) latent → video `[B, 3, T, H, W]` in `[-1, 1]`.
+    public func decode(_ z: MLXArray) -> MLXArray {
+        let x = postQuantConv(z)
+        let slots = countDecoderCacheSlots()
+        let featCache = WanFeatCacheRef(slotCount: slots)
+
+        let numFrame = x.dim(2)
+        var out: MLXArray? = nil
+        for i in 0..<numFrame {
+            let featIdx = WanFeatIdxRef()
+            let chunk = x[0..., 0..., i..<(i + 1)]
+            let cOut = decoder(chunk, featCache: featCache, featIdx: featIdx)
+            out = (out == nil) ? cOut : concatenated([out!, cOut], axis: 2)
+        }
+        return MLX.clip(out!, min: MLXArray(Float(-1.0)), max: MLXArray(Float(1.0)))
+    }
+
+    // MARK: - fromPretrained
+
+    /// Download (if needed), load `vae/config.json` + `vae/diffusion_pytorch_model.safetensors`,
+    /// and construct a fully-initialized `AutoencoderKLWan`. Default repo is
+    /// the recommended `bf16-dmd-merged` variant; any of the four published
+    /// variants work — the VAE is identical across them.
+    public static func fromPretrained(
+        _ repoID: String = "mlx-community/LongCat-Video-Avatar-1.5-bf16-dmd-merged",
+        includeEncoder: Bool = true,
+        progress: (@Sendable (_ file: String, _ done: Int, _ total: Int) -> Void)? = nil
+    ) async throws -> AutoencoderKLWan {
+        let root = try await WeightLoader.snapshotDownload(repoID: repoID, progress: progress)
+        let vaeDir = try WeightLoader.componentDirectory("vae", under: root)
+        let config: WanVAEConfig = try WeightLoader.loadConfig(
+            WanVAEConfig.self,
+            from: vaeDir.appendingPathComponent("config.json")
+        )
+        let model = AutoencoderKLWan(config: config, includeEncoder: includeEncoder)
+        let weights = try WeightLoader.loadSafetensors(
+            url: vaeDir.appendingPathComponent("diffusion_pytorch_model.safetensors")
+        )
+        let updated = ModuleParameters.unflattened(weights)
+        try model.update(parameters: updated, verify: [.noUnusedKeys])
+        return model
+    }
+}
