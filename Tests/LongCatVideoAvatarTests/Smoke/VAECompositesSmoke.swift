@@ -76,11 +76,10 @@ final class VAECompositesSmoke: XCTestCase {
         // total = 6 residuals + 3 resamples = 9
         var residuals = 0, attentions = 0, resamples = 0
         for layer in enc.downBlocks {
-            switch layer {
-            case .residual: residuals += 1
-            case .attention: attentions += 1
-            case .resample: resamples += 1
-            }
+            if layer is WanResidualBlock { residuals += 1 }
+            else if layer is WanAttentionBlock { attentions += 1 }
+            else if layer is WanResample { resamples += 1 }
+            else { XCTFail("unexpected down-block layer type: \(type(of: layer))") }
         }
         XCTAssertEqual(residuals, 8)   // 4 channel transitions × 2 res blocks
         XCTAssertEqual(attentions, 0)

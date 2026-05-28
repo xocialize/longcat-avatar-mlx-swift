@@ -227,15 +227,15 @@ public final class WanRMSNorm: Module, @unchecked Sendable {
 /// this via `with mx.stream(mx.cpu):`; mlx-swift takes per-op
 /// `stream: .cpu` arguments — equivalent semantics.
 public final class WanAttentionBlock: Module, @unchecked Sendable {
-    public let norm: WanRMSNorm
-    public let toQKV: Conv2d
-    public let proj: Conv2d
+    public var norm: WanRMSNorm
+    @ModuleInfo(key: "to_qkv") public var toQKV: Conv2d
+    public var proj: Conv2d
     public let dim: Int
 
     public init(dim: Int) {
         self.dim = dim
         self.norm = WanRMSNorm(dim: dim, images: true)
-        self.toQKV = Conv2d(inputChannels: dim, outputChannels: dim * 3, kernelSize: 1)
+        self._toQKV.wrappedValue = Conv2d(inputChannels: dim, outputChannels: dim * 3, kernelSize: 1)
         self.proj = Conv2d(inputChannels: dim, outputChannels: dim, kernelSize: 1)
         super.init()
     }
@@ -285,8 +285,14 @@ public final class WanAttentionBlock: Module, @unchecked Sendable {
 public final class WanResample: Module, @unchecked Sendable {
     public let mode: String
     public let dim: Int
-    public let resample: Conv2d
-    public let timeConv: CausalConv3d?
+
+    /// Mirrors Python `self.resample = [None, nn.Conv2d(...)]`. The
+    /// safetensors keys are `resample.1.weight` / `resample.1.bias` —
+    /// no key for index 0. Module reflection iterates `[Conv2d?]` as
+    /// `resample.0` (nil → omitted) and `resample.1` (the Conv2d).
+    public var resample: [Conv2d?]
+
+    @ModuleInfo(key: "time_conv") public var timeConv: CausalConv3d?
 
     public init(dim: Int, mode: String) {
         precondition(
@@ -297,20 +303,22 @@ public final class WanResample: Module, @unchecked Sendable {
         self.dim = dim
 
         if mode.hasPrefix("upsample") {
-            self.resample = Conv2d(
-                inputChannels: dim, outputChannels: dim / 2, kernelSize: 3, padding: 1
-            )
-            self.timeConv = (mode == "upsample3d")
+            self.resample = [
+                nil,
+                Conv2d(inputChannels: dim, outputChannels: dim / 2, kernelSize: 3, padding: 1),
+            ]
+            self._timeConv.wrappedValue = (mode == "upsample3d")
                 ? CausalConv3d(
                     inputChannels: dim, outputChannels: dim * 2,
                     kernelSize: (3, 1, 1), stride: (1, 1, 1), padding: (1, 0, 0)
                 )
                 : nil
         } else {
-            self.resample = Conv2d(
-                inputChannels: dim, outputChannels: dim, kernelSize: 3, stride: 2
-            )
-            self.timeConv = (mode == "downsample3d")
+            self.resample = [
+                nil,
+                Conv2d(inputChannels: dim, outputChannels: dim, kernelSize: 3, stride: 2),
+            ]
+            self._timeConv.wrappedValue = (mode == "downsample3d")
                 ? CausalConv3d(
                     inputChannels: dim, outputChannels: dim,
                     kernelSize: (3, 1, 1), stride: (2, 1, 1), padding: (0, 0, 0)
@@ -318,6 +326,14 @@ public final class WanResample: Module, @unchecked Sendable {
                 : nil
         }
         super.init()
+    }
+
+    /// Convenience for the resample conv (Python's `self.resample[1]`).
+    private var resampleConv: Conv2d {
+        guard let c = resample.last, let conv = c else {
+            fatalError("resample[1] missing — WanResample structural drift")
+        }
+        return conv
     }
 
     /// Apply the resample. `featCache`/`featIdx` are passed through chunked
@@ -386,7 +402,7 @@ public final class WanResample: Module, @unchecked Sendable {
             var xs = x.transposed(0, 2, 3, 4, 1).reshaped(b * t, h0, w0, c)
             xs = MLX.repeated(xs, count: 2, axis: 1)
             xs = MLX.repeated(xs, count: 2, axis: 2)
-            xs = resample(xs)
+            xs = resampleConv(xs)
             let cOut = xs.dim(-1)
             return xs.reshaped(b, t, h0 * 2, w0 * 2, cOut).transposed(0, 4, 1, 2, 3)
         } else {
@@ -395,7 +411,7 @@ public final class WanResample: Module, @unchecked Sendable {
                 xs,
                 widths: [.init((0, 0)), .init((0, 1)), .init((0, 1)), .init((0, 0))]
             )
-            xs = resample(xs)
+            xs = resampleConv(xs)
             let cOut = xs.dim(-1)
             let hOut = xs.dim(1), wOut = xs.dim(2)
             var x2 = xs.reshaped(b, t, hOut, wOut, cOut).transposed(0, 4, 1, 2, 3)
@@ -466,12 +482,12 @@ public final class WanResidualBlock: Module, @unchecked Sendable {
     public let inDim: Int
     public let outDim: Int
 
-    public let norm1: WanRMSNorm
-    public let conv1: CausalConv3d
-    public let norm2: WanRMSNorm
-    public let conv2: CausalConv3d
+    public var norm1: WanRMSNorm
+    public var conv1: CausalConv3d
+    public var norm2: WanRMSNorm
+    public var conv2: CausalConv3d
     /// `nil` when `inDim == outDim` (matches PT's `nn.Identity()` slot).
-    public let convShortcut: CausalConv3d?
+    @ModuleInfo(key: "conv_shortcut") public var convShortcut: CausalConv3d?
 
     public init(inDim: Int, outDim: Int) {
         self.inDim = inDim
@@ -481,7 +497,7 @@ public final class WanResidualBlock: Module, @unchecked Sendable {
         self.conv1 = CausalConv3d(inputChannels: inDim, outputChannels: outDim, kernelSize: 3, padding: 1)
         self.norm2 = WanRMSNorm(dim: outDim, images: false)
         self.conv2 = CausalConv3d(inputChannels: outDim, outputChannels: outDim, kernelSize: 3, padding: 1)
-        self.convShortcut = (inDim != outDim)
+        self._convShortcut.wrappedValue = (inDim != outDim)
             ? CausalConv3d(inputChannels: inDim, outputChannels: outDim, kernelSize: 1)
             : nil
         super.init()
@@ -609,22 +625,20 @@ public final class WanUpBlock: Module, @unchecked Sendable {
 // Encoder / Decoder
 // =============================================================================
 
-/// Tagged union for the encoder's flat down-blocks list. Python uses a
-/// `list` of mixed types; Swift needs an enum to keep typing tight while
-/// still preserving the in-order mixed iteration.
-public enum WanDownLayer {
-    case residual(WanResidualBlock)
-    case attention(WanAttentionBlock)
-    case resample(WanResample)
-}
-
 /// 3D VAE Encoder. Matches diffusers' `WanEncoder3d` with `is_residual=false`.
+///
+/// `downBlocks` mirrors Python's flat heterogeneous list mixing
+/// `WanResidualBlock` / `WanAttentionBlock` / `WanResample`. Declared as
+/// `[Module]` so mlx-swift's Mirror reflection iterates it as a list of
+/// modules and produces safetensors-compatible paths like
+/// `down_blocks.0.weight`, `down_blocks.5.resample.1.weight`, etc.
+/// Runtime forward() switch-casts on concrete type.
 public final class WanEncoder3d: Module, @unchecked Sendable {
-    public let convIn: CausalConv3d
-    public let downBlocks: [WanDownLayer]
-    public let midBlock: WanMidBlock
-    public let normOut: WanRMSNorm
-    public let convOut: CausalConv3d
+    @ModuleInfo(key: "conv_in") public var convIn: CausalConv3d
+    @ModuleInfo(key: "down_blocks") public var downBlocks: [Module]
+    @ModuleInfo(key: "mid_block") public var midBlock: WanMidBlock
+    @ModuleInfo(key: "norm_out") public var normOut: WanRMSNorm
+    @ModuleInfo(key: "conv_out") public var convOut: CausalConv3d
 
     public init(
         inChannels: Int = 3,
@@ -640,32 +654,36 @@ public final class WanEncoder3d: Module, @unchecked Sendable {
         let dims = [dim] + mults.map { dim * $0 }
         var scale: Float = 1.0
 
-        self.convIn = CausalConv3d(inputChannels: inChannels, outputChannels: dims[0], kernelSize: 3, padding: 1)
+        self._convIn.wrappedValue = CausalConv3d(
+            inputChannels: inChannels, outputChannels: dims[0], kernelSize: 3, padding: 1
+        )
 
-        var blocks: [WanDownLayer] = []
+        var blocks: [Module] = []
         var outDim = dims[0]
         for i in 0..<(dims.count - 1) {
             var inD = dims[i]
             let outD = dims[i + 1]
             for _ in 0..<numResBlocks {
-                blocks.append(.residual(WanResidualBlock(inDim: inD, outDim: outD)))
+                blocks.append(WanResidualBlock(inDim: inD, outDim: outD))
                 if attnScales.contains(scale) {
-                    blocks.append(.attention(WanAttentionBlock(dim: outD)))
+                    blocks.append(WanAttentionBlock(dim: outD))
                 }
                 inD = outD
             }
             if i != mults.count - 1 {
                 let mode = tempDown[i] ? "downsample3d" : "downsample2d"
-                blocks.append(.resample(WanResample(dim: outD, mode: mode)))
+                blocks.append(WanResample(dim: outD, mode: mode))
                 scale /= 2.0
             }
             outDim = outD
         }
-        self.downBlocks = blocks
+        self._downBlocks.wrappedValue = blocks
 
-        self.midBlock = WanMidBlock(dim: outDim, numLayers: 1)
-        self.normOut = WanRMSNorm(dim: outDim, images: false)
-        self.convOut = CausalConv3d(inputChannels: outDim, outputChannels: zDim, kernelSize: 3, padding: 1)
+        self._midBlock.wrappedValue = WanMidBlock(dim: outDim, numLayers: 1)
+        self._normOut.wrappedValue = WanRMSNorm(dim: outDim, images: false)
+        self._convOut.wrappedValue = CausalConv3d(
+            inputChannels: outDim, outputChannels: zDim, kernelSize: 3, padding: 1
+        )
         super.init()
     }
 
@@ -693,15 +711,16 @@ public final class WanEncoder3d: Module, @unchecked Sendable {
             y = convIn(y)
         }
 
-        // ----- down blocks -----
+        // ----- down blocks (runtime cast on the heterogeneous list) -----
         for layer in downBlocks {
-            switch layer {
-            case .residual(let r):
+            if let r = layer as? WanResidualBlock {
                 y = r(y, featCache: featCache, featIdx: featIdx)
-            case .attention(let a):
-                y = a(y)   // no cache plumbing — attention is stateless per-frame
-            case .resample(let s):
+            } else if let a = layer as? WanAttentionBlock {
+                y = a(y)   // stateless per-frame
+            } else if let s = layer as? WanResample {
                 y = s(y, featCache: featCache, featIdx: featIdx)
+            } else {
+                fatalError("unexpected down-block layer: \(type(of: layer))")
             }
         }
 
@@ -729,11 +748,11 @@ public final class WanEncoder3d: Module, @unchecked Sendable {
 
 /// 3D VAE Decoder. Matches diffusers' `WanDecoder3d` with `is_residual=false`.
 public final class WanDecoder3d: Module, @unchecked Sendable {
-    public let convIn: CausalConv3d
-    public let midBlock: WanMidBlock
-    public let upBlocks: [WanUpBlock]
-    public let normOut: WanRMSNorm
-    public let convOut: CausalConv3d
+    @ModuleInfo(key: "conv_in") public var convIn: CausalConv3d
+    @ModuleInfo(key: "mid_block") public var midBlock: WanMidBlock
+    @ModuleInfo(key: "up_blocks") public var upBlocks: [WanUpBlock]
+    @ModuleInfo(key: "norm_out") public var normOut: WanRMSNorm
+    @ModuleInfo(key: "conv_out") public var convOut: CausalConv3d
 
     public init(
         outChannels: Int = 3,
@@ -750,8 +769,10 @@ public final class WanDecoder3d: Module, @unchecked Sendable {
         let reversedMults = Array(mults.reversed())
         let dims = [dim * mults.last!] + reversedMults.map { dim * $0 }
 
-        self.convIn = CausalConv3d(inputChannels: zDim, outputChannels: dims[0], kernelSize: 3, padding: 1)
-        self.midBlock = WanMidBlock(dim: dims[0], numLayers: 1)
+        self._convIn.wrappedValue = CausalConv3d(
+            inputChannels: zDim, outputChannels: dims[0], kernelSize: 3, padding: 1
+        )
+        self._midBlock.wrappedValue = WanMidBlock(dim: dims[0], numLayers: 1)
 
         var ups: [WanUpBlock] = []
         var outDim = dims[0]
@@ -767,10 +788,12 @@ public final class WanDecoder3d: Module, @unchecked Sendable {
             ))
             outDim = outD
         }
-        self.upBlocks = ups
+        self._upBlocks.wrappedValue = ups
 
-        self.normOut = WanRMSNorm(dim: outDim, images: false)
-        self.convOut = CausalConv3d(inputChannels: outDim, outputChannels: outChannels, kernelSize: 3, padding: 1)
+        self._normOut.wrappedValue = WanRMSNorm(dim: outDim, images: false)
+        self._convOut.wrappedValue = CausalConv3d(
+            inputChannels: outDim, outputChannels: outChannels, kernelSize: 3, padding: 1
+        )
         super.init()
     }
 
@@ -871,12 +894,12 @@ public final class AutoencoderKLWan: Module, @unchecked Sendable {
     public let invStd: MLXArray
 
     // Decoder side: always present
-    public let decoder: WanDecoder3d
-    public let postQuantConv: CausalConv3d
+    public var decoder: WanDecoder3d
+    @ModuleInfo(key: "post_quant_conv") public var postQuantConv: CausalConv3d
 
     // Encoder side: optional (decoder-only init for inference-as-decoder)
-    public let encoder: WanEncoder3d?
-    public let quantConv: CausalConv3d?
+    public var encoder: WanEncoder3d?
+    @ModuleInfo(key: "quant_conv") public var quantConv: CausalConv3d?
 
     public init(config: WanVAEConfig = .init(), includeEncoder: Bool = true) {
         let zDim = config.zDim
@@ -899,7 +922,9 @@ public final class AutoencoderKLWan: Module, @unchecked Sendable {
             outChannels: 3, dim: baseDim, zDim: zDim, dimMult: dimMult,
             numResBlocks: numResBlocks, temperalUpsample: tempUp
         )
-        self.postQuantConv = CausalConv3d(inputChannels: zDim, outputChannels: zDim, kernelSize: 1)
+        self._postQuantConv.wrappedValue = CausalConv3d(
+            inputChannels: zDim, outputChannels: zDim, kernelSize: 1
+        )
 
         if includeEncoder {
             self.encoder = WanEncoder3d(
@@ -907,10 +932,12 @@ public final class AutoencoderKLWan: Module, @unchecked Sendable {
                 numResBlocks: numResBlocks, attnScales: attnScales,
                 temperalDownsample: tempDown
             )
-            self.quantConv = CausalConv3d(inputChannels: zDim * 2, outputChannels: zDim * 2, kernelSize: 1)
+            self._quantConv.wrappedValue = CausalConv3d(
+                inputChannels: zDim * 2, outputChannels: zDim * 2, kernelSize: 1
+            )
         } else {
             self.encoder = nil
-            self.quantConv = nil
+            self._quantConv.wrappedValue = nil
         }
         super.init()
     }
@@ -936,10 +963,10 @@ public final class AutoencoderKLWan: Module, @unchecked Sendable {
         guard let encoder else { return 0 }
         var n = 1  // conv_in
         for layer in encoder.downBlocks {
-            switch layer {
-            case .residual: n += 2
-            case .resample(let r) where r.mode == "downsample3d": n += 1
-            default: break
+            if layer is WanResidualBlock {
+                n += 2
+            } else if let r = layer as? WanResample, r.mode == "downsample3d" {
+                n += 1
             }
         }
         for _ in encoder.midBlock.resnets { n += 2 }
@@ -1028,9 +1055,16 @@ public final class AutoencoderKLWan: Module, @unchecked Sendable {
             from: vaeDir.appendingPathComponent("config.json")
         )
         let model = AutoencoderKLWan(config: config, includeEncoder: includeEncoder)
-        let weights = try WeightLoader.loadSafetensors(
+        var weights = try WeightLoader.loadSafetensors(
             url: vaeDir.appendingPathComponent("diffusion_pytorch_model.safetensors")
         )
+        // Decoder-only construction: drop encoder-side weights from the
+        // safetensors before update, otherwise `.noUnusedKeys` rejects them.
+        if !includeEncoder {
+            weights = weights.filter { key, _ in
+                !(key.hasPrefix("encoder.") || key.hasPrefix("quant_conv."))
+            }
+        }
         let updated = ModuleParameters.unflattened(weights)
         try model.update(parameters: updated, verify: [.noUnusedKeys])
         return model
