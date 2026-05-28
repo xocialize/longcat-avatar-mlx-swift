@@ -63,7 +63,14 @@ let package = Package(
         .testTarget(
             name: "LongCatVideoAvatarTests",
             dependencies: ["LongCatVideoAvatar"],
-            path: "Tests/LongCatVideoAvatarTests"
+            path: "Tests/LongCatVideoAvatarTests",
+            resources: [
+                // Tiny .npy reference outputs from the Python-MLX VAE,
+                // consumed by Parity/VAEParity.swift. Total ~470 KB.
+                // Regenerate via the companion Python repo's
+                // scripts/dump_vae_swift_fixtures.py.
+                .copy("Resources"),
+            ]
         ),
     ]
 )

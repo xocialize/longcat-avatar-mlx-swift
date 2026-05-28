@@ -21,6 +21,12 @@ weights/
 *.safetensors
 *.mp4
 *.npy
+# …but the VAE parity test fixtures (~470 KB total) ARE tracked.
+!Tests/LongCatVideoAvatarTests/Resources/vae-parity/*.npy
+
+# Coverage / test runtime artifacts
+default.profraw
+*.profraw
 
 # Local notes
 notes/
