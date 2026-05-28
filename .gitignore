@@ -1,0 +1,27 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Test artifacts
+*.xcresult/
+
+# Local weight caches (large)
+weights/
+*.safetensors
+*.mp4
+*.npy
+
+# Local notes
+notes/
+scratch/
