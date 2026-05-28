@@ -80,7 +80,10 @@ func loadNumpy(url: URL) throws -> MLXArray {
     else {
         throw NumpyError.headerParseFailure("missing 'descr'")
     }
-    guard descr == "<f4" else {
+    // Supported dtypes: <f4 (fp32) and <i4 (int32). Other dtypes need an
+    // explicit case here — generic numpy support is out of scope.
+    let supported = ["<f4", "<i4"]
+    guard supported.contains(descr) else {
         throw NumpyError.unsupportedDescr(descr)
     }
 
@@ -101,20 +104,26 @@ func loadNumpy(url: URL) throws -> MLXArray {
         throw NumpyError.headerParseFailure("empty shape: \(shapeRaw)")
     }
 
-    // Payload: row-major fp32 little-endian.
+    // Payload: row-major little-endian, fp32 or int32 (4 bytes either way).
     let payload = data[(headerStart + headerLen)...]
     let count = nums.reduce(1, *)
-    let expectedBytes = count * MemoryLayout<Float>.size
+    let expectedBytes = count * 4   // both fp32 and int32 are 4 bytes/element
     guard payload.count == expectedBytes else {
         throw NumpyError.headerParseFailure(
             "payload size mismatch: have \(payload.count), expected \(expectedBytes)"
         )
     }
 
-    // Copy into a Float buffer and construct an MLXArray.
-    let floats: [Float] = payload.withUnsafeBytes { raw in
-        let f = raw.bindMemory(to: Float.self)
-        return Array(f)
+    if descr == "<f4" {
+        let floats: [Float] = payload.withUnsafeBytes { raw in
+            Array(raw.bindMemory(to: Float.self))
+        }
+        return MLXArray(floats, nums)
+    } else {
+        // <i4 — int32
+        let ints: [Int32] = payload.withUnsafeBytes { raw in
+            Array(raw.bindMemory(to: Int32.self))
+        }
+        return MLXArray(ints, nums)
     }
-    return MLXArray(floats, nums)
 }

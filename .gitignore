@@ -23,6 +23,7 @@ weights/
 *.npy
 # …but the VAE parity test fixtures (~470 KB total) ARE tracked.
 !Tests/LongCatVideoAvatarTests/Resources/vae-parity/*.npy
+!Tests/LongCatVideoAvatarTests/Resources/umt5-parity/*.npy
 
 # Coverage / test runtime artifacts
 default.profraw
