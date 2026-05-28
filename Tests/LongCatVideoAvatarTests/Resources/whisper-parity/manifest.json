@@ -1,0 +1,31 @@
+{
+  "generator": "longcat-avatar-mlx/scripts/dump_whisper_swift_fixtures.py",
+  "source_weights": "mlx-community/LongCat-Video-Avatar-1.5-bf16-dmd-merged",
+  "seed": 42,
+  "shapes": {
+    "input_mel": [
+      1,
+      128,
+      64
+    ],
+    "output": [
+      1,
+      32,
+      1280
+    ]
+  },
+  "files": {
+    "input_mel.npy": {
+      "sha256_16": "621cce75647d0694"
+    },
+    "output.npy": {
+      "sha256_16": "03d8dc9905f36075"
+    }
+  },
+  "thresholds": {
+    "# Like umT5 (L22), expect Python-MLX vs Swift-MLX bf16 matmul drift.": null,
+    "# Whisper is smaller (d_model=1280 vs umT5's 4096) but 32 layers": null,
+    "# vs 24 \u2014 net compounded drift is likely in the same ballpark.": null,
+    "output_max_abs": 0.15
+  }
+}
