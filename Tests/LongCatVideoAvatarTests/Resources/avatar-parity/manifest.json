@@ -1,0 +1,66 @@
+{
+  "generator": "longcat-avatar-mlx/scripts/dump_avatar_swift_fixtures.py",
+  "source_weights": "mlx-community/LongCat-Video-Avatar-1.5-bf16-dmd-merged",
+  "seed": 42,
+  "shapes": {
+    "hidden_states": [
+      1,
+      16,
+      3,
+      8,
+      8
+    ],
+    "timestep": [
+      1
+    ],
+    "encoder_hidden_states": [
+      1,
+      1,
+      4,
+      4096
+    ],
+    "encoder_attention_mask": [
+      1,
+      4
+    ],
+    "audio_embs": [
+      1,
+      9,
+      5,
+      5,
+      1280
+    ],
+    "output": [
+      1,
+      16,
+      3,
+      8,
+      8
+    ]
+  },
+  "files": {
+    "hidden_states.npy": {
+      "sha256_16": "71f9c9eb4e2c91cc"
+    },
+    "timestep.npy": {
+      "sha256_16": "2bc5dfe475414f89"
+    },
+    "encoder_hidden_states.npy": {
+      "sha256_16": "904fc66971cd6861"
+    },
+    "encoder_attention_mask.npy": {
+      "sha256_16": "5738ee26febc7404"
+    },
+    "audio_embs.npy": {
+      "sha256_16": "33282ce3e04aec1c"
+    },
+    "output.npy": {
+      "sha256_16": "9e69820e7a4ce6ed"
+    }
+  },
+  "thresholds": {
+    "# Base DiT was 0.033. Avatar adds audio cross-attn (fused SDPA)": null,
+    "# per block + audio_adaLN modulation. Same fused-SDPA-dominant.": null,
+    "output_max_abs": 0.15
+  }
+}
