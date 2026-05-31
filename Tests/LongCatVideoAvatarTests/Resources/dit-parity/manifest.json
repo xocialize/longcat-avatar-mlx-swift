@@ -1,0 +1,57 @@
+{
+  "generator": "longcat-avatar-mlx/scripts/dump_dit_swift_fixtures.py",
+  "source_weights": "mlx-community/LongCat-Video-Avatar-1.5-bf16-dmd-merged",
+  "seed": 42,
+  "shapes": {
+    "hidden_states": [
+      1,
+      16,
+      1,
+      8,
+      8
+    ],
+    "timestep": [
+      1
+    ],
+    "encoder_hidden_states": [
+      1,
+      1,
+      4,
+      4096
+    ],
+    "encoder_attention_mask": [
+      1,
+      4
+    ],
+    "output": [
+      1,
+      16,
+      1,
+      8,
+      8
+    ]
+  },
+  "files": {
+    "hidden_states.npy": {
+      "sha256_16": "37d6f8d557ee5efb"
+    },
+    "timestep.npy": {
+      "sha256_16": "2bc5dfe475414f89"
+    },
+    "encoder_hidden_states.npy": {
+      "sha256_16": "904fc66971cd6861"
+    },
+    "encoder_attention_mask.npy": {
+      "sha256_16": "5738ee26febc7404"
+    },
+    "output.npy": {
+      "sha256_16": "396d491dafa3dd18"
+    }
+  },
+  "thresholds": {
+    "# Per L22 + S3.4/S3.5 findings: the base DiT uses attn.qkv + sdpa,": null,
+    "# FFN swiglu via plain Linears. 48 layers x bf16 noise compounds.": null,
+    "# Target generous threshold while we measure actual drift.": null,
+    "output_max_abs": 0.5
+  }
+}
