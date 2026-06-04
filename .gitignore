@@ -27,6 +27,7 @@ weights/
 !Tests/LongCatVideoAvatarTests/Resources/whisper-parity/*.npy
 !Tests/LongCatVideoAvatarTests/Resources/dit-parity/*.npy
 !Tests/LongCatVideoAvatarTests/Resources/avatar-parity/*.npy
+!Tests/LongCatVideoAvatarTests/Resources/pipeline-parity/*.npy
 
 # Coverage / test runtime artifacts
 default.profraw

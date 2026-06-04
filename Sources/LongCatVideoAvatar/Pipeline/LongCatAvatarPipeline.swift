@@ -179,7 +179,8 @@ public final class LongCatAvatarPipeline {
         numFrames: Int? = nil,
         height: Int = 480,
         width: Int = 832,
-        seed: UInt64 = 0
+        seed: UInt64 = 0,
+        initialNoise: MLXArray? = nil
     ) -> MLXArray {
         let nFrames = numFrames ?? config.numFrames
 
@@ -190,10 +191,17 @@ public final class LongCatAvatarPipeline {
         // 2. Prepare audio embeddings
         var audioEmbs = prepareAudioEmbs(audioMel)
 
-        // 3. Initial noise + concat ref
-        let noise = makeInitialNoise(
-            batchSize: 1, numFrames: nFrames, height: height, width: width, seed: seed
-        )
+        // 3. Initial noise + concat ref. Caller can pass `initialNoise` to
+        //    skip the seeded MLXRandom path — needed for Python-vs-Swift
+        //    parity, since the two runtimes' RNG state isn't seed-compatible.
+        let noise: MLXArray
+        if let provided = initialNoise {
+            noise = provided
+        } else {
+            noise = makeInitialNoise(
+                batchSize: 1, numFrames: nFrames, height: height, width: width, seed: seed
+            )
+        }
         var latents = MLX.concatenated([refLatent, noise], axis: 2)
         let TLatFull = latents.dim(2)
 
