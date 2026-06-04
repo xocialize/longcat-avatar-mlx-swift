@@ -386,8 +386,11 @@ public final class LongCatVideoTransformer3DModel: Module, @unchecked Sendable {
     }
 
     /// Download + load the published DiT weights. Detects quantization
-    /// metadata in dit/config.json and applies nn.quantize before loading
-    /// the bit-packed shards (mirrors Python L19/L20).
+    /// metadata in dit/config.json and applies `MLXNN.quantize` BEFORE
+    /// loading the bit-packed shards — required so `QuantizedLinear`
+    /// modules are installed in the right places before the
+    /// `weight`/`scales`/`biases` tensors land via `update(parameters:)`.
+    /// Mirrors the Python pattern (`scripts/run_inference.py:88-182`).
     public static func fromPretrained(
         _ repoID: String = "mlx-community/LongCat-Video-Avatar-1.5-bf16-dmd-merged",
         progress: (@Sendable (_ file: String, _ done: Int, _ total: Int) -> Void)? = nil
@@ -400,18 +403,16 @@ public final class LongCatVideoTransformer3DModel: Module, @unchecked Sendable {
         )
         let model = LongCatVideoTransformer3DModel.fromConfig(config)
 
-        // Sharded safetensors
+        // Apply quantization BEFORE loading weights so QuantizedLinear
+        // modules sit in the right slots when packed tensors land.
+        if let qcfg = config.quantization {
+            WeightLoader.applyDiTQuantization(to: model, config: qcfg)
+        }
+
+        // Sharded safetensors load (after quantize so packed shards align).
         let weights = try WeightLoader.loadShardedSafetensors(
             indexURL: dir.appendingPathComponent("diffusion_pytorch_model.safetensors.index.json")
         )
-
-        // TODO(S3.6): quantization detection — if config.quantization is set,
-        // call MLXNN.quantize with skip predicate before update(parameters:).
-        // For now, raise if quantized weights are loaded (skip this code path
-        // by using the bf16 variant for parity).
-        if config.quantization != nil {
-            fatalError("S3.6: quantized DiT load path not yet wired through fromPretrained — use the bf16 variant repo id")
-        }
 
         let updated = ModuleParameters.unflattened(weights)
         try model.update(parameters: updated, verify: [.noUnusedKeys])

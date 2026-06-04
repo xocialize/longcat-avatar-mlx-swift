@@ -582,6 +582,10 @@ public final class LongCatVideoAvatarTransformer3DModel: Module, @unchecked Send
 
     /// Download + load the full Avatar DiT weights. No filtering needed —
     /// every key in the published checkpoint maps to a slot in this class.
+    /// Detects quantization metadata and applies `MLXNN.quantize` BEFORE
+    /// the shard load so `QuantizedLinear` modules sit in the right slots
+    /// when packed `weight`/`scales`/`biases` tensors land. Mirrors the
+    /// Python pattern at `scripts/run_inference.py:88-182`.
     public static func fromPretrained(
         _ repoID: String = "mlx-community/LongCat-Video-Avatar-1.5-bf16-dmd-merged",
         progress: (@Sendable (_ file: String, _ done: Int, _ total: Int) -> Void)? = nil
@@ -593,13 +597,16 @@ public final class LongCatVideoAvatarTransformer3DModel: Module, @unchecked Send
             from: dir.appendingPathComponent("config.json")
         )
         let model = LongCatVideoAvatarTransformer3DModel.fromConfig(config)
+
+        // Apply quantization BEFORE weight load so packed shards align with
+        // QuantizedLinear module slots.
+        if let qcfg = config.quantization {
+            WeightLoader.applyDiTQuantization(to: model, config: qcfg)
+        }
+
         let weights = try WeightLoader.loadShardedSafetensors(
             indexURL: dir.appendingPathComponent("diffusion_pytorch_model.safetensors.index.json")
         )
-
-        if config.quantization != nil {
-            fatalError("S3.7: quantized Avatar DiT load not yet wired — use the bf16 variant repo id")
-        }
 
         let updated = ModuleParameters.unflattened(weights)
         try model.update(parameters: updated, verify: [.noUnusedKeys])

@@ -7,6 +7,8 @@
 
 import Foundation
 import XCTest
+import MLX
+import MLXNN
 @testable import LongCatVideoAvatar
 
 final class WeightLoaderSmoke: XCTestCase {
@@ -136,6 +138,87 @@ final class WeightLoaderSmoke: XCTestCase {
 
         let quant = try WeightLoader.detectQuantization(ditConfigURL: url)
         XCTAssertEqual(quant?.bits, 8)
+    }
+
+    // MARK: - applyDiTQuantization (S3.6.q)
+
+    /// Tiny synthetic module mirroring the DiT name-pattern surface.
+    /// `final_layer.linear` and `t_embedder.mlp` should be SKIPPED;
+    /// `blocks.0.attn.qkv` should be QUANTIZED.
+    final class _TinyDiTLike: Module {
+        @ModuleInfo(key: "final_layer") var finalLayer: _FinalLayerStub
+        @ModuleInfo(key: "t_embedder") var tEmbedder: _TEmbedderStub
+        @ModuleInfo(key: "blocks") var blocks: [_BlockStub]
+
+        override init() {
+            self._finalLayer.wrappedValue = _FinalLayerStub()
+            self._tEmbedder.wrappedValue = _TEmbedderStub()
+            self._blocks.wrappedValue = [_BlockStub()]
+            super.init()
+        }
+    }
+    final class _FinalLayerStub: Module {
+        @ModuleInfo(key: "linear") var linear: Linear
+        override init() {
+            self._linear.wrappedValue = Linear(64, 64, bias: false)
+            super.init()
+        }
+    }
+    final class _TEmbedderStub: Module {
+        @ModuleInfo(key: "mlp") var mlp: Linear
+        override init() {
+            self._mlp.wrappedValue = Linear(64, 64, bias: false)
+            super.init()
+        }
+    }
+    final class _BlockStub: Module {
+        @ModuleInfo(key: "attn") var attn: _AttnStub
+        override init() {
+            self._attn.wrappedValue = _AttnStub()
+            super.init()
+        }
+    }
+    final class _AttnStub: Module {
+        @ModuleInfo(key: "qkv") var qkv: Linear
+        override init() {
+            self._qkv.wrappedValue = Linear(64, 64, bias: false)
+            super.init()
+        }
+    }
+
+    func testApplyDiTQuantizationSkipsConfiguredPatternsAndQuantizesRest() throws {
+        let model = _TinyDiTLike()
+        let cfg = QuantizationConfig(
+            method: "mlx.nn.quantize",
+            bits: 4,
+            groupSize: 64,
+            skipPatterns: ["final_layer.linear", "t_embedder."]
+        )
+
+        WeightLoader.applyDiTQuantization(to: model, config: cfg)
+
+        // Skip-pattern matches stay regular Linear.
+        XCTAssertFalse(model.finalLayer.linear is QuantizedLinear,
+                       "final_layer.linear must remain regular Linear (skip pattern)")
+        XCTAssertFalse(model.tEmbedder.mlp is QuantizedLinear,
+                       "t_embedder.mlp must remain regular Linear (skip pattern)")
+        // Everything else under nn.Linear gets quantized.
+        XCTAssertTrue(model.blocks[0].attn.qkv is QuantizedLinear,
+                      "blocks.0.attn.qkv must be quantized to QuantizedLinear")
+    }
+
+    func testApplyDiTQuantizationWithEmptySkipPatternsQuantizesAllLinears() throws {
+        let model = _TinyDiTLike()
+        let cfg = QuantizationConfig(
+            method: "mlx.nn.quantize",
+            bits: 4,
+            groupSize: 64,
+            skipPatterns: []
+        )
+        WeightLoader.applyDiTQuantization(to: model, config: cfg)
+        XCTAssertTrue(model.finalLayer.linear is QuantizedLinear)
+        XCTAssertTrue(model.tEmbedder.mlp is QuantizedLinear)
+        XCTAssertTrue(model.blocks[0].attn.qkv is QuantizedLinear)
     }
 
     // MARK: - componentDirectory
