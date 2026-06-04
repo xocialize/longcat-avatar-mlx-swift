@@ -28,9 +28,15 @@ ports, its architectural summary, and an explicit `TODO(S3.x)` block.
 - [ ] Parse `safetensors.index.json` for sharded components (umT5, DiT)
 - [ ] `mx.load`-equivalent for sharded weights through mlx-swift
 - [ ] Env override `LONGCAT_AVATAR_WEIGHTS_DIR` for local dev
-- [ ] Detect `quantization` block in `dit/config.json`; surface to caller
+- [x] Detect `quantization` block in `dit/config.json`; surface to caller
       so they can apply `MLXNN.quantize` *before* loading bit-packed shards
-      (mirror Python L19/L20 lessons)
+      (mirror Python L19/L20 lessons) — **S3.6.q landed 2026-06-04**:
+      `WeightLoader.applyDiTQuantization(to:config:)` wired into both
+      `LongCatVideoTransformer3DModel.fromPretrained` and
+      `LongCatVideoAvatarTransformer3DModel.fromPretrained`. fatalError
+      stubs removed. Smoke tests in `WeightLoaderSmoke.swift` verify
+      skip-pattern routing (Linear → `QuantizedLinear` swap on eligible
+      paths, regular `Linear` on skipped paths).
 
 ## S3.3 — Port Wan VAE
 

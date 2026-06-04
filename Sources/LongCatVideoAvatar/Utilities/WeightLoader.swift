@@ -20,6 +20,7 @@
 
 import Foundation
 import MLX
+import MLXNN
 
 public enum WeightLoaderError: LocalizedError {
     case invalidRepoID(String)
@@ -203,6 +204,46 @@ public enum WeightLoader {
         } catch {
             throw WeightLoaderError.decodingError(ditConfigURL, underlying: error)
         }
+    }
+
+    // MARK: - DiT quantize-on-load
+
+    /// Apply `MLXNN.quantize` to a freshly-constructed DiT *before* loading the
+    /// bit-packed shards. Required so that `QuantizedLinear` modules are
+    /// installed in the right places before `weight`/`scales`/`biases` tensors
+    /// land via `update(parameters:)`.
+    ///
+    /// Mirrors the Python port's `_quantize_dit_for_load`
+    /// (`scripts/run_inference.py:88-125`) and the conversion recipe's
+    /// `_should_quantize_dit_linear` predicate
+    /// (`recipes/convert_longcat_avatar.py:297-321`):
+    ///
+    /// 1. Only quantize `MLXNN.Linear` layers.
+    /// 2. Skip any module whose path substring-matches one of
+    ///    `config.skipPatterns` (typically `final_layer.linear`,
+    ///    `t_embedder.`, `y_embedder.`, `adaLN_modulation.`,
+    ///    `audio_adaLN_modulation.` — embedders / fp32-sensitive paths).
+    ///
+    /// Shared between `LongCatVideoTransformer3DModel` and its Avatar subclass.
+    public static func applyDiTQuantization(to model: Module, config: QuantizationConfig) {
+        let skipPatterns = config.skipPatterns
+        let bits = config.bits
+        let groupSize = config.groupSize
+
+        MLXNN.quantize(
+            model: model,
+            groupSize: groupSize,
+            bits: bits,
+            filter: { (path: String, module: Module) -> Bool in
+                // Only quantize Linear — embeddings stay full precision per Meituan.
+                guard module is MLXNN.Linear else { return false }
+                // Skip any path matching a configured skip pattern.
+                for pat in skipPatterns where path.contains(pat) {
+                    return false
+                }
+                return true
+            }
+        )
     }
 
     // MARK: - Component path helpers
