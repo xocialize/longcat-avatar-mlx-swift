@@ -5,11 +5,26 @@ Meituan's audio-driven video diffusion model — using
 [mlx-swift](https://github.com/ml-explore/mlx-swift) for inference on
 Apple Silicon.
 
-> **Status:** scaffold only. Module ports are tracked in
-> [`docs/port-roadmap.md`](docs/port-roadmap.md). The companion Python
-> port at [xocialize/longcat-avatar-mlx](https://github.com/xocialize/longcat-avatar-mlx)
-> is the production-ready reference — start there if you want to run the
-> model today.
+> **Status: feature-complete.** All four model components + the inference
+> pipeline are ported and parity-tested against the Python reference.
+> End-to-end pipeline matches Python-MLX within bf16 GPU kernel noise
+> (0.23 absolute over the [-1,1] output range).
+
+## Parity vs Python-MLX (`xcrun xctest`)
+
+| Component | Parity max_abs | Threshold | Notes |
+|---|---|---|---|
+| Wan VAE encode | **3.1e-6** | 1e-4 | fp32 throughout |
+| Wan VAE decode | **1.76e-3** | 5e-3 | bf16, .cpu-stream attention (L10) |
+| umT5-XXL | **0.119** | 0.15 | 24 layers, manual matmul+softmax (L22) |
+| Whisper-large-v3 | **0.016** | 0.15 | 32 layers, fused SDPA |
+| Base DiT (48 blocks) | **0.033** | 0.1 | 48 layers, fused SDPA |
+| Avatar DiT (full) | **0.32** | 0.5 | + audio path (extra 48 Linears + AudioProjModel) |
+| **End-to-end pipeline** | **0.23** | 5.0 | 8 DMD steps × 3-pass CFG + VAE encode/decode |
+
+The fused-SDPA-is-determinism finding (S3.5) holds across the whole port:
+modules using `MLXFast.scaledDotProductAttention` are ~10× tighter against
+Python-MLX than modules with manual matmul+softmax chains.
 
 ## What this is
 

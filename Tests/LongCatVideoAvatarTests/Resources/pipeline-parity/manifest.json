@@ -1,0 +1,94 @@
+{
+  "generator": "longcat-avatar-mlx/scripts/dump_pipeline_swift_fixtures.py",
+  "source_weights": "mlx-community/LongCat-Video-Avatar-1.5-bf16-dmd-merged",
+  "seed": 42,
+  "config": {
+    "height": 64,
+    "width": 64,
+    "num_frames": 5,
+    "T_mel": 200,
+    "text_tokens": 4,
+    "caption_channels": 4096
+  },
+  "shapes": {
+    "image.npy": [
+      1,
+      3,
+      1,
+      64,
+      64
+    ],
+    "audio_mel.npy": [
+      1,
+      128,
+      200
+    ],
+    "text_embeds.npy": [
+      1,
+      1,
+      4,
+      4096
+    ],
+    "text_mask.npy": [
+      1,
+      4
+    ],
+    "uncond_embeds.npy": [
+      1,
+      1,
+      4,
+      4096
+    ],
+    "uncond_mask.npy": [
+      1,
+      4
+    ],
+    "initial_noise.npy": [
+      1,
+      16,
+      2,
+      8,
+      8
+    ],
+    "output.npy": [
+      1,
+      3,
+      5,
+      64,
+      64
+    ]
+  },
+  "files": {
+    "image.npy": {
+      "sha256_16": "9267a952b9135d38"
+    },
+    "audio_mel.npy": {
+      "sha256_16": "6e8e50fb1fd8b027"
+    },
+    "text_embeds.npy": {
+      "sha256_16": "a0afca7a3faf3ea9"
+    },
+    "text_mask.npy": {
+      "sha256_16": "5738ee26febc7404"
+    },
+    "uncond_embeds.npy": {
+      "sha256_16": "4ff0f5576bfbd7d0"
+    },
+    "uncond_mask.npy": {
+      "sha256_16": "5738ee26febc7404"
+    },
+    "initial_noise.npy": {
+      "sha256_16": "0feb1c497209b418"
+    },
+    "output.npy": {
+      "sha256_16": "20ac2615a6eaa86c"
+    }
+  },
+  "thresholds": {
+    "# Avatar DiT one-pass measured 0.32. Full pipeline runs the DiT 3x": null,
+    "# per step for 8 steps = 24 DiT passes, then VAE encode + decode.": null,
+    "# Expect end-to-end divergence to compound to ~1-3 abs given 8 steps": null,
+    "# of Avatar DiT drift + a VAE decode pass. Threshold conservative.": null,
+    "output_max_abs": 5.0
+  }
+}
