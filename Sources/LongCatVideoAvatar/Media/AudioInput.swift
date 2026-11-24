@@ -17,7 +17,6 @@
 import AVFoundation
 import Foundation
 import MLX
-import WhisperMLX
 
 public enum AudioInputError: Error, CustomStringConvertible {
     case unreadable(String)
@@ -98,14 +97,14 @@ public enum AudioInput {
     /// 16 kHz mono samples → Whisper log-mel `[1, 128, 3000 * chunks]`, each
     /// 30 s chunk padded and normalized on its own, as the PT feature extractor does.
     public static func whisperMel(_ samples: [Float]) -> MLXArray {
-        let chunkSamples = WhisperAudio.nSamples
+        let chunkSamples = WhisperMel.nSamples
         var chunks: [MLXArray] = []
         var start = 0
         repeat {
             let end = min(start + chunkSamples, samples.count)
             let chunk = MLXArray(Array(samples[start..<end]))
             // (3000, 128) → (128, 3000)
-            chunks.append(WhisperAudio.logMelSpectrogram(WhisperAudio.padOrTrim(chunk)).transposed(1, 0))
+            chunks.append(WhisperMel.logMelSpectrogram(WhisperMel.padOrTrim(chunk)).transposed(1, 0))
             start = end
         } while start < samples.count
         let mel = chunks.count == 1 ? chunks[0] : MLX.concatenated(chunks, axis: 1)

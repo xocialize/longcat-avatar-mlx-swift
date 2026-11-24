@@ -40,8 +40,8 @@ let package = Package(
         .package(url: "https://github.com/xocialize/mlx-swift", exact: "0.33.1"),
         // Tokenizers for umT5 (1.x: what co-resolves with the engine and the fleet's other packages).
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.1.6"),
-        // The Whisper log-mel frontend (128 bins, parity-gated against mlx-whisper) and audio decoding.
-        .package(url: "https://github.com/xocialize/whisper-mlx-swift.git", from: "0.3.0"),
+        // STFT and mel-filterbank primitives for the Whisper log-mel front end (Audio/WhisperMel.swift).
+        .package(url: "https://github.com/xocialize/mlx-audio-dsp.git", from: "0.1.0"),
         // MLXToolKit: the engine contract the ModelPackage is written against.
         .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.82.1"),
         // Arg parsing for the CLI target.
@@ -58,9 +58,11 @@ let package = Package(
                 // Tokenizers (incl. T5 sentencepiece). Weight download has its own
                 // minimal HF-Hub client in Utilities/WeightLoader.swift.
                 .product(name: "Tokenizers", package: "swift-transformers"),
-                .product(name: "WhisperMLX", package: "whisper-mlx-swift"),
+                .product(name: "MLXAudioDSP", package: "mlx-audio-dsp"),
             ],
             path: "Sources/LongCatVideoAvatar",
+            // The Whisper mel filterbank and Hann window (openai/whisper's values).
+            resources: [.copy("Resources/mel_filters_128.safetensors")],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .target(
