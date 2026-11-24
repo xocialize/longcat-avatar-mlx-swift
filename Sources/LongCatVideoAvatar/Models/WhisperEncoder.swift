@@ -237,10 +237,15 @@ public final class WhisperEncoder: Module, @unchecked Sendable {
 
     /// Download (if needed) + load the published Whisper encoder weights.
     public static func fromPretrained(
-        _ repoID: String = "mlx-community/LongCat-Video-Avatar-1.5-bf16-dmd-merged",
+        _ repoID: String = LongCatAvatarPipeline.defaultRepoID,
         progress: (@Sendable (_ file: String, _ done: Int, _ total: Int) -> Void)? = nil
     ) async throws -> WhisperEncoder {
         let root = try await WeightLoader.snapshotDownload(repoID: repoID, progress: progress)
+        return try fromDirectory(root)
+    }
+
+    /// Load from a local variant directory (the layout the conversion recipe writes).
+    public static func fromDirectory(_ root: URL) throws -> WhisperEncoder {
         let dir = try WeightLoader.componentDirectory("audio_encoder", under: root)
         let config: WhisperConfig = try WeightLoader.loadConfig(
             WhisperConfig.self,

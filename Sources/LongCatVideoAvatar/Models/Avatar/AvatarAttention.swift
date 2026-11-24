@@ -33,10 +33,10 @@ public final class AvatarAttention: Module, @unchecked Sendable {
     public let headDim: Int
     public let scale: Float
 
-    public var qkv: Linear
+    @ModuleInfo public var qkv: Linear
     @ModuleInfo(key: "q_norm") public var qNorm: RMSNormFP32
     @ModuleInfo(key: "k_norm") public var kNorm: RMSNormFP32
-    public var proj: Linear
+    @ModuleInfo public var proj: Linear
 
     @ModuleInfo(key: "rope_3d") public var rope3d: RotaryPositionalEmbedding
 
@@ -47,16 +47,16 @@ public final class AvatarAttention: Module, @unchecked Sendable {
         self.headDim = dim / numHeads
         self.scale = Float(1.0) / Foundation.sqrt(Float(self.headDim))
 
-        self.qkv = Linear(dim, dim * 3, bias: true)
+        self._qkv.wrappedValue = Linear(dim, dim * 3, bias: true)
         self._qNorm.wrappedValue = RMSNormFP32(dim: self.headDim, eps: 1e-6)
         self._kNorm.wrappedValue = RMSNormFP32(dim: self.headDim, eps: 1e-6)
-        self.proj = Linear(dim, dim)
+        self._proj.wrappedValue = Linear(dim, dim)
         self._rope3d.wrappedValue = RotaryPositionalEmbedding(headDim: self.headDim)
         super.init()
     }
 
     private func processAttn(_ q: MLXArray, _ k: MLXArray, _ v: MLXArray) -> MLXArray {
-        MLXFast.scaledDotProductAttention(queries: q, keys: k, values: v, scale: scale, mask: .none)
+        SlicedAttention.attend(q, k, v, scale: scale)
     }
 
     /// Forward.
@@ -97,11 +97,16 @@ public final class AvatarAttention: Module, @unchecked Sendable {
 
         let out: MLXArray
 
-        // Reference Skip Q-slicing path
-        if let ncl = numCondLatents, ncl > 1,
-           let nrl = numRefLatents,
-           refImgIndex != nil,
-           let mfr = maskFrameRange, mfr > 0 {
+        // Video continuation (PT `num_cond_latents > 1`): the reference frame
+        // and the conditioning frames each attend only within themselves,
+        // whatever `maskFrameRange` is. `maskFrameRange > 0` additionally hides
+        // the reference from the noise frames around `refImgIndex` (Reference
+        // Skip); with 0, the Avatar 1.6 default, every noise query sees all keys.
+        if let ncl = numCondLatents, ncl > 1 {
+            guard let nrl = numRefLatents, refImgIndex != nil else {
+                fatalError("No specified insertion position for reference frame")
+            }
+            let mfr = maskFrameRange ?? 0
             let numRefThw = tokensPerFrame
             let nclThw = ncl * tokensPerFrame
 
@@ -121,8 +126,8 @@ public final class AvatarAttention: Module, @unchecked Sendable {
                 out = MLX.concatenated([xRef, xCond], axis: 2)
             } else {
                 let qNoise = q[0..., 0..., nclThw...]
-                let startNoise = (refImgIndex ?? 0) - mfr - ncl + nrl
-                let endNoise = (refImgIndex ?? 0) + mfr - ncl + nrl + 1
+                let startNoise = mfr > 0 ? (refImgIndex ?? 0) - mfr - ncl + nrl : 0
+                let endNoise = mfr > 0 ? (refImgIndex ?? 0) + mfr - ncl + nrl + 1 : 0
 
                 if startNoise >= 0 && endNoise > startNoise && endNoise <= numNoisyFrames {
                     let startPos = startNoise * tokensPerFrame
@@ -145,8 +150,8 @@ public final class AvatarAttention: Module, @unchecked Sendable {
                     out = MLX.concatenated([xRef, xCond, xNoise], axis: 2)
                 }
             }
-        } else if let ncl = numCondLatents, ncl > 0 {
-            // Standard cond branching (matches base)
+        } else if let ncl = numCondLatents, ncl == 1 {
+            // Image to video: the one conditioning frame attends within itself
             let nclThw = ncl * tokensPerFrame
             let qCond = q[0..., 0..., 0..<nclThw]
             let kCond = k[0..., 0..., 0..<nclThw]
@@ -189,7 +194,7 @@ public final class SingleStreamAttention: Module, @unchecked Sendable {
 
     @ModuleInfo(key: "q_linear") public var qLinear: Linear
     @ModuleInfo(key: "q_norm") public var qNorm: RMSNormFP32?
-    public var proj: Linear
+    @ModuleInfo public var proj: Linear
 
     @ModuleInfo(key: "kv_linear") public var kvLinear: Linear
     @ModuleInfo(key: "k_norm") public var kNorm: RMSNormFP32?
@@ -221,7 +226,7 @@ public final class SingleStreamAttention: Module, @unchecked Sendable {
 
         self._qLinear.wrappedValue = Linear(dim, dim, bias: qkvBias)
         self._qNorm.wrappedValue = qkNorm ? RMSNormFP32(dim: self.headDim, eps: eps) : nil
-        self.proj = Linear(dim, dim)
+        self._proj.wrappedValue = Linear(dim, dim)
         self._kvLinear.wrappedValue = Linear(encoderHiddenStatesDim, dim * 2, bias: qkvBias)
         self._kNorm.wrappedValue = qkNorm ? RMSNormFP32(dim: self.headDim, eps: eps) : nil
 

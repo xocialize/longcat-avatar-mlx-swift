@@ -346,10 +346,15 @@ public final class UMT5EncoderModel: Module, @unchecked Sendable {
     /// Download + load the published 3-shard umT5 weights into a fully-
     /// initialized model.
     public static func fromPretrained(
-        _ repoID: String = "mlx-community/LongCat-Video-Avatar-1.5-bf16-dmd-merged",
+        _ repoID: String = LongCatAvatarPipeline.defaultRepoID,
         progress: (@Sendable (_ file: String, _ done: Int, _ total: Int) -> Void)? = nil
     ) async throws -> UMT5EncoderModel {
         let root = try await WeightLoader.snapshotDownload(repoID: repoID, progress: progress)
+        return try fromDirectory(root)
+    }
+
+    /// Load from a local variant directory (the layout the conversion recipe writes).
+    public static func fromDirectory(_ root: URL) throws -> UMT5EncoderModel {
         let dir = try WeightLoader.componentDirectory("text_encoder", under: root)
         let config: UMT5Config = try WeightLoader.loadConfig(
             UMT5Config.self,

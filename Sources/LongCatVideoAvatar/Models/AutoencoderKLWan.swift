@@ -1003,7 +1003,7 @@ public final class AutoencoderKLWan: Module, @unchecked Sendable {
         let t = x.dim(2)
         let numChunks = 1 + (t - 1) / 4
 
-        var out: MLXArray? = nil
+        var chunks: [MLXArray] = []
         for i in 0..<numChunks {
             let featIdx = WanFeatIdxRef()
             let chunk: MLXArray
@@ -1013,9 +1013,11 @@ public final class AutoencoderKLWan: Module, @unchecked Sendable {
                 chunk = x[0..., 0..., (1 + 4 * (i - 1))..<(1 + 4 * i)]
             }
             let cOut = encoder(chunk, featCache: featCache, featIdx: featIdx)
-            out = (out == nil) ? cOut : concatenated([out!, cOut], axis: 2)
+            // Materialize per chunk (see `decode`).
+            MLX.eval(cOut)
+            chunks.append(cOut)
         }
-        let pre = quantConv(out!)
+        let pre = quantConv(chunks.count == 1 ? chunks[0] : concatenated(chunks, axis: 2))
         let parts = MLX.split(pre, parts: 2, axis: 1)
         return parts[0]   // mu; discard logvar
     }
@@ -1027,14 +1029,22 @@ public final class AutoencoderKLWan: Module, @unchecked Sendable {
         let featCache = WanFeatCacheRef(slotCount: slots)
 
         let numFrame = x.dim(2)
-        var out: MLXArray? = nil
+        var chunks: [MLXArray] = []
         for i in 0..<numFrame {
             let featIdx = WanFeatIdxRef()
             let chunk = x[0..., 0..., i..<(i + 1)]
-            let cOut = decoder(chunk, featCache: featCache, featIdx: featIdx)
-            out = (out == nil) ? cOut : concatenated([out!, cOut], axis: 2)
+            let cOut = MLX.clip(
+                decoder(chunk, featCache: featCache, featIdx: featIdx),
+                min: MLXArray(Float(-1.0)), max: MLXArray(Float(1.0)))
+            // Materialize per latent frame. Left lazy, the graph spans every
+            // frame and is evaluated in one go: its full-resolution feature
+            // maps for all frames are then live together (measured: +38 GB
+            // over the resident set for 93 frames at 768×512). Evaluated
+            // here, only one frame's maps and the causal caches are.
+            MLX.eval(cOut)
+            chunks.append(cOut)
         }
-        return MLX.clip(out!, min: MLXArray(Float(-1.0)), max: MLXArray(Float(1.0)))
+        return chunks.count == 1 ? chunks[0] : concatenated(chunks, axis: 2)
     }
 
     // MARK: - fromPretrained
@@ -1044,11 +1054,16 @@ public final class AutoencoderKLWan: Module, @unchecked Sendable {
     /// the recommended `bf16-dmd-merged` variant; any of the four published
     /// variants work — the VAE is identical across them.
     public static func fromPretrained(
-        _ repoID: String = "mlx-community/LongCat-Video-Avatar-1.5-bf16-dmd-merged",
+        _ repoID: String = LongCatAvatarPipeline.defaultRepoID,
         includeEncoder: Bool = true,
         progress: (@Sendable (_ file: String, _ done: Int, _ total: Int) -> Void)? = nil
     ) async throws -> AutoencoderKLWan {
         let root = try await WeightLoader.snapshotDownload(repoID: repoID, progress: progress)
+        return try fromDirectory(root, includeEncoder: includeEncoder)
+    }
+
+    /// Load from a local variant directory (the layout the conversion recipe writes).
+    public static func fromDirectory(_ root: URL, includeEncoder: Bool = true) throws -> AutoencoderKLWan {
         let vaeDir = try WeightLoader.componentDirectory("vae", under: root)
         let config: WanVAEConfig = try WeightLoader.loadConfig(
             WanVAEConfig.self,

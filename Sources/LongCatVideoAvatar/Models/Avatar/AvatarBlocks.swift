@@ -38,10 +38,10 @@ public final class AudioProjModel: Module, @unchecked Sendable {
     public let inputDimVF: Int
     public let normOutputAudio: Bool
 
-    public var proj1: Linear
+    @ModuleInfo public var proj1: Linear
     @ModuleInfo(key: "proj1_vf") public var proj1VF: Linear
-    public var proj2: Linear
-    public var proj3: Linear
+    @ModuleInfo public var proj2: Linear
+    @ModuleInfo public var proj3: Linear
     /// PT: `self.norm = nn.LayerNorm(output_dim) if norm_output_audio else nn.Identity()`.
     /// When `norm_output_audio=False`, PT uses Identity (no params, no key).
     /// We mirror with an optional — only the `true` path carries weights.
@@ -68,10 +68,10 @@ public final class AudioProjModel: Module, @unchecked Sendable {
         self.outputDim = outputDim
         self.normOutputAudio = normOutputAudio
 
-        self.proj1 = Linear(self.inputDim, intermediateDim)
+        self._proj1.wrappedValue = Linear(self.inputDim, intermediateDim)
         self._proj1VF.wrappedValue = Linear(self.inputDimVF, intermediateDim)
-        self.proj2 = Linear(intermediateDim, intermediateDim)
-        self.proj3 = Linear(intermediateDim, contextTokens * outputDim)
+        self._proj2.wrappedValue = Linear(intermediateDim, intermediateDim)
+        self._proj3.wrappedValue = Linear(intermediateDim, contextTokens * outputDim)
         if normOutputAudio {
             self.norm = LayerNorm(dimensions: outputDim)
         }

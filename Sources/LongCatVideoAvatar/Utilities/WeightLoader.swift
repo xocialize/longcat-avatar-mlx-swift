@@ -163,7 +163,7 @@ public enum WeightLoader {
         combined.reserveCapacity(index.weightMap.count)
         for (shard, tensors) in grouped {
             let shardURL = baseDir.appendingPathComponent(shard)
-            let shardDict = try MLX.loadArrays(url: shardURL)
+            let shardDict = try loadSafetensors(url: shardURL)
             for tensor in tensors {
                 guard let arr = shardDict[tensor] else { continue }
                 combined[tensor] = arr
@@ -172,10 +172,33 @@ public enum WeightLoader {
         return combined
     }
 
-    /// Convenience: load a single safetensors file (non-sharded components
-    /// like vae/, audio_encoder/).
+    /// Load a single safetensors file (a shard, or a non-sharded component
+    /// like vae/, audio_encoder/), materialized.
+    ///
+    /// The read rides the CPU stream and is evaluated here, in bounded
+    /// chunks. A lazy `Load` binds to the stream current at creation; on the
+    /// GPU stream a multi-GB read holds one Metal command buffer open past
+    /// the ~10 s watchdog (`kIOGPUCommandBufferCallbackErrorTimeout`, which
+    /// is fatal and uncatchable). On a slow disk chunked GPU-side evaluation
+    /// is not enough.
     public static func loadSafetensors(url: URL) throws -> [String: MLXArray] {
-        try MLX.loadArrays(url: url)
+        try Device.withDefaultDevice(.cpu) {
+            let arrays = try MLX.loadArrays(url: url)
+            materialize(arrays)
+            return arrays
+        }
+    }
+
+    /// Evaluate `weights` in chunks of `chunk` arrays. No-op for arrays that
+    /// are already materialized.
+    public static func materialize(_ weights: [String: MLXArray], chunk: Int = 64) {
+        let values = Array(weights.values)
+        var start = 0
+        while start < values.count {
+            let end = min(start + chunk, values.count)
+            MLX.eval(Array(values[start..<end]))
+            start = end
+        }
     }
 
     // MARK: - Config + quantization detection
