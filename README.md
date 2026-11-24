@@ -144,7 +144,7 @@ One full segment (93 frames, 3.72 s) at 768×512, through the engine package:
 ## Tests
 
 ```bash
-swift test                                                              # 147 tests, no weights
+swift test                                                              # 151 tests, no weights
 LONGCAT_AVATAR_V16_DIR=/path/to/LongCat-Video-Avatar-1.6-bf16 swift test --filter AvatarV16Parity
 ```
 
