@@ -41,23 +41,60 @@ import ArgumentParser
 import Foundation
 import LongCatVideoAvatar
 import MLX
+import Tokenizers
 
 @main
 struct RunInference: AsyncParsableCommand {
     @Option(help: "HF repo id of the converted MLX weights (mlx-community/...)")
-    var repo: String = "mlx-community/LongCat-Video-Avatar-1.5-bf16-dmd-merged"
+    var repo: String = LongCatAvatarPipeline.defaultRepoID
 
-    @Option(help: "Directory containing pre-processed .npy inputs")
-    var inputDir: String
+    @Option(help: "Local variant directory (the conversion recipe's layout); used instead of --repo")
+    var weightsDir: String?
+
+    @Option(help: "Avatar 1.6: leading steps using mix_alpha*DMD + (1-mix_alpha)*OPSD (default: the variant's, 4)")
+    var mixSteps: Int?
+
+    @Option(help: "Avatar 1.6: DMD weight during the mixed steps (default: the variant's, 1.0)")
+    var mixAlpha: Float?
+
+    @Option(help: "Reference output .npy (Python-MLX) to compare against; prints max/mean abs diff")
+    var reference: String?
+
+    @Option(help: "With --reference: fail when the max abs diff exceeds this")
+    var tolerance: Float?
+
+    @Option(help: "Parity mode: directory of pre-processed .npy inputs (writes a .npy tensor)")
+    var inputDir: String?
+
+    @Option(help: "Clip mode: reference image (PNG / JPEG)")
+    var image: String?
+
+    @Option(help: "Clip mode: driving speech (any AVFoundation-readable audio)")
+    var audio: String?
+
+    @Option(help: "Clip mode: scene prompt")
+    var prompt: String?
+
+    @Option(help: "Clip mode: frames wanted at 25 fps (default: the audio's whole length)")
+    var clipFrames: Int?
+
+    @Option(help: "Clip mode: 480p or 720p bucket tier")
+    var resolution: String = "480p"
 
     @Option(help: "Number of frames to generate (must match initial_noise.npy if provided)")
     var frames: Int = 5
 
-    @Option(help: "Output video height (must match image.npy)")
+    @Option(help: "Parity mode: output video height (must match image.npy)")
     var height: Int = 64
 
-    @Option(help: "Output video width (must match image.npy)")
+    @Option(help: "Parity mode: output video width (must match image.npy)")
     var width: Int = 64
+
+    @Option(name: .customLong("clip-height"), help: "Clip mode: explicit height (default: the bucket for the image)")
+    var heightOverride: Int?
+
+    @Option(name: .customLong("clip-width"), help: "Clip mode: explicit width")
+    var widthOverride: Int?
 
     @Option(help: "Random seed for noise (ignored if initial_noise.npy is present)")
     var seed: UInt64 = 0
@@ -66,6 +103,7 @@ struct RunInference: AsyncParsableCommand {
     var out: String = "output.npy"
 
     func run() async throws {
+        guard let inputDir else { return try await runClip() }
         let dir = URL(fileURLWithPath: inputDir, isDirectory: true)
         print("=== LongCat-Avatar MLX Swift inference ===")
         print("Repo:      \(repo)")
@@ -74,9 +112,9 @@ struct RunInference: AsyncParsableCommand {
         print("Size:      \(height) x \(width)")
         print()
 
-        print("[1/4] Loading pipeline (downloads weights on first run, ~46 GB)...")
+        print("[1/4] Loading pipeline (a repo downloads its weights on first run)...")
         let t0 = Date()
-        let pipeline = try await LongCatAvatarPipeline.fromPretrained(repo)
+        let pipeline = try await loadPipeline().pipeline
         print("       loaded in \(String(format: "%.1f", Date().timeIntervalSince(t0)))s")
 
         print("[2/4] Loading inputs...")
@@ -97,7 +135,7 @@ struct RunInference: AsyncParsableCommand {
 
         print("[3/4] Running pipeline...")
         let t1 = Date()
-        let video = pipeline(
+        let video = try pipeline(
             image: image,
             audioMel: audioMel,
             textEmbeds: textEmbeds,
@@ -108,7 +146,7 @@ struct RunInference: AsyncParsableCommand {
             height: height,
             width: width,
             seed: seed,
-            initialNoise: initialNoise
+            initialNoise: initialNoise.map { [$0] }
         )
         video.eval()
         print("       inference: \(String(format: "%.1f", Date().timeIntervalSince(t1)))s")
@@ -116,8 +154,84 @@ struct RunInference: AsyncParsableCommand {
         print("[4/4] Saving output to \(out)...")
         try saveNpyFloat32(video.asType(.float32), to: URL(fileURLWithPath: out))
         print("       video shape: \(video.shape)")
+        if let reference {
+            let want = try loadNpy(URL(fileURLWithPath: reference))
+            guard want.shape == video.shape else {
+                throw RunInferenceError.invalidNpy(URL(fileURLWithPath: reference), "shape \(want.shape) vs output \(video.shape)")
+            }
+            let diff = MLX.abs(video.asType(.float32) - want)
+            let maxDiff = diff.max().item(Float.self), meanDiff = diff.mean().item(Float.self)
+            print("       vs reference: max_abs=\(maxDiff) mean_abs=\(meanDiff)")
+            if let tolerance, !(maxDiff <= tolerance) {
+                throw RunInferenceError.parity(maxDiff, tolerance)
+            }
+        }
         print()
         print("Done. To convert to MP4: post-process the .npy with imageio/ffmpeg.")
+    }
+
+    /// The variant's root directory and the pipeline loaded from it.
+    private func loadPipeline() async throws -> (root: URL, pipeline: LongCatAvatarPipeline) {
+        var config = PipelineConfig()
+        config.mixSteps = mixSteps
+        config.mixAlpha = mixAlpha
+        let root: URL
+        if let weightsDir {
+            root = URL(fileURLWithPath: weightsDir, isDirectory: true)
+        } else {
+            root = try await WeightLoader.snapshotDownload(repoID: repo)
+        }
+        let pipeline = try LongCatAvatarPipeline.fromDirectory(root, config: config)
+        if let mix = pipeline.loraMix {
+            print("       LoRA mix: \(mix.modules.count) target modules, mixSteps=\(mix.mixSteps), mixAlpha=\(mix.mixAlpha)")
+        }
+        return (root, pipeline)
+    }
+
+    /// Clip mode: image + speech + prompt → MP4 with the speech muxed in.
+    private func runClip() async throws {
+        guard let image, let audio, let prompt else {
+            throw ValidationError("give --input-dir (parity mode), or --image, --audio and --prompt (clip mode)")
+        }
+        guard let tier = AvatarResolution(rawValue: resolution) else {
+            throw ValidationError("--resolution is 480p or 720p")
+        }
+        let output = URL(fileURLWithPath: out.hasSuffix(".npy") ? "output.mp4" : out)
+        print("=== LongCat-Avatar MLX Swift: clip ===")
+        print("[1/3] Loading pipeline...")
+        var t = Date()
+        let (root, pipeline) = try await loadPipeline()
+        print("       loaded in \(String(format: "%.1f", Date().timeIntervalSince(t)))s")
+
+        print("[2/3] Encoding prompt...")
+        t = Date()
+        let tokenizer = try await AutoTokenizer.from(modelFolder: root.appendingPathComponent("tokenizer"))
+        let (embeds, mask) = PromptEncoding.encode(prompt, encoder: pipeline.textEncoder!, tokenizer: tokenizer)
+        // Distilled sampling runs without CFG: the unconditional branch is never evaluated.
+        let text = LongCatAvatarPipeline.TextConditioning(
+            embeds: embeds, mask: mask, uncondEmbeds: MLXArray.zeros(like: embeds), uncondMask: mask)
+        print("       \(String(format: "%.1f", Date().timeIntervalSince(t)))s")
+
+        print("[3/3] Generating...")
+        t = Date()
+        var last = Date()
+        pipeline.onStep = { segment, step, total in
+            if step > 0 {
+                print("       segment \(segment + 1) step \(step)/\(total): \(String(format: "%.1f", Date().timeIntervalSince(last)))s")
+            }
+            last = Date()
+        }
+        let reference = try ImageInput.decode(try Data(contentsOf: URL(fileURLWithPath: image)))
+        let plan = try await pipeline.generateMP4(
+            image: reference, speechURL: URL(fileURLWithPath: audio), text: text, output: output,
+            frames: clipFrames, resolution: tier,
+            size: (heightOverride != nil && widthOverride != nil) ? (widthOverride!, heightOverride!) : nil,
+            seed: seed)
+        let seconds = Date().timeIntervalSince(t)
+        print("       \(plan.width)x\(plan.height), \(plan.frames) frames (\(String(format: "%.2f", plan.seconds)) s) in "
+              + "\(plan.segments) segment(s): \(String(format: "%.1f", seconds))s, "
+              + "peak memory \(String(format: "%.1f", Double(MLX.Memory.peakMemory) / 1e9)) GB")
+        print("Wrote \(output.path)")
     }
 
     /// Load a `.npy` file as fp32 or int32 MLXArray.
@@ -212,8 +326,10 @@ struct RunInference: AsyncParsableCommand {
 
 enum RunInferenceError: LocalizedError {
     case invalidNpy(URL, String)
+    case parity(Float, Float)
     var errorDescription: String? {
         switch self {
+        case .parity(let got, let limit): return "max abs diff \(got) exceeds the tolerance \(limit)"
         case .invalidNpy(let url, let why): return "Bad .npy file \(url.lastPathComponent): \(why)"
         }
     }

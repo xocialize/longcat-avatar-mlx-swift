@@ -392,7 +392,7 @@ public final class LongCatVideoTransformer3DModel: Module, @unchecked Sendable {
     /// `weight`/`scales`/`biases` tensors land via `update(parameters:)`.
     /// Mirrors the Python pattern (`scripts/run_inference.py:88-182`).
     public static func fromPretrained(
-        _ repoID: String = "mlx-community/LongCat-Video-Avatar-1.5-bf16-dmd-merged",
+        _ repoID: String = LongCatAvatarPipeline.defaultRepoID,
         progress: (@Sendable (_ file: String, _ done: Int, _ total: Int) -> Void)? = nil
     ) async throws -> LongCatVideoTransformer3DModel {
         let root = try await WeightLoader.snapshotDownload(repoID: repoID, progress: progress)

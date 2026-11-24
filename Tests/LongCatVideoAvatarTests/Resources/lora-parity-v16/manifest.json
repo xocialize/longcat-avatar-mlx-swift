@@ -1,0 +1,101 @@
+{
+  "generator": "longcat-avatar-mlx/scripts/dump_lora_swift_fixtures.py",
+  "source_weights": "LongCat-Video-Avatar-1.6-bf16",
+  "seed": 42,
+  "target_modules": {
+    "dmd": 336,
+    "opsd": 336
+  },
+  "modules": {
+    "m0": {
+      "path": "blocks.0.attn.qkv",
+      "in": 4096,
+      "dmd": {
+        "abs_max": 0.007473199162632227,
+        "out": 12288
+      },
+      "splits": 3,
+      "alpha_scale": 0.5,
+      "opsd": {
+        "abs_max": 0.00859172735363245,
+        "out": 12288
+      },
+      "dmd_vs_opsd_abs_max": 0.006025014445185661
+    },
+    "m1": {
+      "path": "blocks.17.attn.proj",
+      "in": 4096,
+      "dmd": {
+        "abs_max": 0.013857332058250904,
+        "out": 4096
+      },
+      "splits": 1,
+      "alpha_scale": 0.5,
+      "opsd": {
+        "abs_max": 0.01051646750420332,
+        "out": 4096
+      },
+      "dmd_vs_opsd_abs_max": 0.011679400689899921
+    },
+    "m2": {
+      "path": "blocks.23.cross_attn.q_linear",
+      "in": 4096,
+      "dmd": {
+        "abs_max": 0.007601458579301834,
+        "out": 4096
+      },
+      "splits": 1,
+      "alpha_scale": 0.5,
+      "opsd": {
+        "abs_max": 0.0046912855468690395,
+        "out": 4096
+      },
+      "dmd_vs_opsd_abs_max": 0.00609213300049305
+    },
+    "m3": {
+      "path": "blocks.31.cross_attn.kv_linear",
+      "in": 4096,
+      "dmd": {
+        "abs_max": 0.0059507377445697784,
+        "out": 8192
+      },
+      "splits": 2,
+      "alpha_scale": 0.5,
+      "opsd": {
+        "abs_max": 0.004042177461087704,
+        "out": 8192
+      },
+      "dmd_vs_opsd_abs_max": 0.003785801352933049
+    },
+    "m4": {
+      "path": "blocks.40.ffn.w1",
+      "in": 4096,
+      "dmd": {
+        "abs_max": 0.017543602734804153,
+        "out": 11008
+      },
+      "splits": 1,
+      "alpha_scale": 0.5,
+      "opsd": {
+        "abs_max": 0.012419984675943851,
+        "out": 11008
+      },
+      "dmd_vs_opsd_abs_max": 0.01052134856581688
+    },
+    "m5": {
+      "path": "blocks.47.ffn.w2",
+      "in": 11008,
+      "dmd": {
+        "abs_max": 0.007572094909846783,
+        "out": 4096
+      },
+      "splits": 1,
+      "alpha_scale": 0.5,
+      "opsd": {
+        "abs_max": 0.00792675744742155,
+        "out": 4096
+      },
+      "dmd_vs_opsd_abs_max": 0.006816057488322258
+    }
+  }
+}

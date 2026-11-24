@@ -148,4 +148,53 @@ public enum AudioProcess {
         }
         return MLX.stacked(windows, axis: 2)   // [B, T_video, W, G, D]
     }
+
+    /// Encoder-rate group features → one feature per video frame, as PT
+    /// `get_audio_embedding_whisper`: keep the first `videoLength * 2` encoder
+    /// frames (the audio's real extent; every 30 s chunk is padded), then
+    /// interpolate to `videoLength` with align-corners.
+    /// - audioGroups: `[1, T_enc, 5, D]`
+    /// - videoLength: `Int(audioSeconds * fps)`; defaults to the whole input
+    /// - Returns: `[T_video, 5, D]`
+    public static func buildFrameAudioFeatures(
+        _ audioGroups: MLXArray,
+        fps: Int = 25,
+        encFps: Int = 50,
+        videoLength: Int? = nil
+    ) -> MLXArray {
+        precondition(audioGroups.dim(0) == 1, "one driving audio per call")
+        let TEnc = audioGroups.dim(1), G = audioGroups.dim(2), D = audioGroups.dim(3)
+        let length = videoLength ?? Int(Float(TEnc) / Float(encFps) * Float(fps))
+        let validCount = min(TEnc, length * (encFps / fps))
+        let valid = audioGroups[0..., 0..<validCount]
+        let resampled = linearInterpolateFeatures(
+            valid.reshaped(1, validCount, G * D),
+            inputFps: Float(encFps), outputFps: Float(fps), outputLen: length
+        )
+        return resampled.reshaped(length, G, D)
+    }
+
+    /// The DiT's `audio_embs` for `numFrames` video frames starting at frame
+    /// `start`: each frame takes the `audioWindow` features centred on it,
+    /// indices clamped to the audio's extent (PT `center_indices`).
+    /// - frameFeatures: `[T_video, 5, D]` from `buildFrameAudioFeatures`
+    /// - Returns: `[1, numFrames, W, 5, D]`
+    public static func windowAudioFeatures(
+        _ frameFeatures: MLXArray,
+        start: Int,
+        numFrames: Int,
+        audioWindow: Int = 5
+    ) -> MLXArray {
+        let T = frameFeatures.dim(0)
+        let half = audioWindow / 2
+        var indices: [Int32] = []
+        indices.reserveCapacity(numFrames * audioWindow)
+        for frame in start..<(start + numFrames) {
+            for offset in -half...half {
+                indices.append(Int32(min(max(frame + offset, 0), T - 1)))
+            }
+        }
+        let gathered = frameFeatures[MLXArray(indices)]   // [numFrames * W, 5, D]
+        return gathered.reshaped(1, numFrames, audioWindow, frameFeatures.dim(1), frameFeatures.dim(2))
+    }
 }

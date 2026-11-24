@@ -36,10 +36,10 @@ public final class Attention: Module, @unchecked Sendable {
     public let headDim: Int
     public let scale: Float
 
-    public var qkv: Linear
+    @ModuleInfo public var qkv: Linear
     @ModuleInfo(key: "q_norm") public var qNorm: RMSNormFP32
     @ModuleInfo(key: "k_norm") public var kNorm: RMSNormFP32
-    public var proj: Linear
+    @ModuleInfo public var proj: Linear
 
     @ModuleInfo(key: "rope_3d") public var rope3d: RotaryPositionalEmbedding
 
@@ -50,17 +50,17 @@ public final class Attention: Module, @unchecked Sendable {
         self.headDim = dim / numHeads
         self.scale = Float(1.0) / Foundation.sqrt(Float(self.headDim))
 
-        self.qkv = Linear(dim, dim * 3, bias: true)
+        self._qkv.wrappedValue = Linear(dim, dim * 3, bias: true)
         self._qNorm.wrappedValue = RMSNormFP32(dim: self.headDim, eps: 1e-6)
         self._kNorm.wrappedValue = RMSNormFP32(dim: self.headDim, eps: 1e-6)
-        self.proj = Linear(dim, dim)
+        self._proj.wrappedValue = Linear(dim, dim)
         self._rope3d.wrappedValue = RotaryPositionalEmbedding(headDim: self.headDim)
         super.init()
     }
 
     /// Dense SDPA wrapper. `q, k, v: [B, H, S, D]`. Returns `[B, H, S_q, D]`.
     private func processAttn(_ q: MLXArray, _ k: MLXArray, _ v: MLXArray) -> MLXArray {
-        MLXFast.scaledDotProductAttention(queries: q, keys: k, values: v, scale: scale, mask: .none)
+        SlicedAttention.attend(q, k, v, scale: scale)
     }
 
     /// Forward.
@@ -182,7 +182,7 @@ public final class MultiHeadCrossAttention: Module, @unchecked Sendable {
 
     @ModuleInfo(key: "q_linear") public var qLinear: Linear
     @ModuleInfo(key: "kv_linear") public var kvLinear: Linear
-    public var proj: Linear
+    @ModuleInfo public var proj: Linear
 
     @ModuleInfo(key: "q_norm") public var qNorm: RMSNormFP32
     @ModuleInfo(key: "k_norm") public var kNorm: RMSNormFP32
@@ -196,7 +196,7 @@ public final class MultiHeadCrossAttention: Module, @unchecked Sendable {
 
         self._qLinear.wrappedValue = Linear(dim, dim)
         self._kvLinear.wrappedValue = Linear(dim, dim * 2)
-        self.proj = Linear(dim, dim)
+        self._proj.wrappedValue = Linear(dim, dim)
         self._qNorm.wrappedValue = RMSNormFP32(dim: self.headDim, eps: 1e-6)
         self._kNorm.wrappedValue = RMSNormFP32(dim: self.headDim, eps: 1e-6)
         super.init()
@@ -271,5 +271,39 @@ public final class MultiHeadCrossAttention: Module, @unchecked Sendable {
             return MLX.concatenated([zerosCond, outNoise], axis: 1)
         }
         return processCrossAttn(x, cond: cond, kvSeqlen: kvSeqlen)
+    }
+}
+
+// MARK: - Query-sliced dense attention
+
+/// Dense attention materializes the score matrix `[B, H, S_q, S_k]`. A
+/// 93-frame 480p clip is ~37,000 tokens: 32 heads × 37,000² bf16 scores is
+/// ~87 GB in one array. PT avoids it with flash attention; here the queries
+/// are processed in slices whose scores stay under a byte budget. Rows of an
+/// attention matrix are independent, so the result is the same.
+public enum SlicedAttention {
+    /// The most bytes one slice's score matrix may take.
+    nonisolated(unsafe) public static var scoreBudgetBytes = 2 * 1024 * 1024 * 1024
+
+    public static func attend(_ q: MLXArray, _ k: MLXArray, _ v: MLXArray, scale: Float) -> MLXArray {
+        let queries = q.dim(2)
+        let rowBytes = q.dim(0) * q.dim(1) * k.dim(2) * q.dtype.size
+        if rowBytes * queries <= scoreBudgetBytes {
+            return MLXFast.scaledDotProductAttention(queries: q, keys: k, values: v, scale: scale, mask: .none)
+        }
+        let rows = max(1, scoreBudgetBytes / rowBytes)
+        MLX.eval(q, k, v)
+        var parts: [MLXArray] = []
+        var start = 0
+        while start < queries {
+            let end = min(start + rows, queries)
+            let part = MLXFast.scaledDotProductAttention(
+                queries: q[0..., 0..., start..<end], keys: k, values: v, scale: scale, mask: .none)
+            // Evaluate now: a lazy graph may otherwise hold several slices' scores at once.
+            MLX.eval(part)
+            parts.append(part)
+            start = end
+        }
+        return MLX.concatenated(parts, axis: 2)
     }
 }

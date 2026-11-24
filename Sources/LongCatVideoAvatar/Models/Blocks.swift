@@ -26,9 +26,9 @@ public final class FeedForwardSwiGLU: Module, @unchecked Sendable {
     public let dim: Int
     public let hiddenDim: Int
 
-    public var w1: Linear
-    public var w2: Linear
-    public var w3: Linear
+    @ModuleInfo public var w1: Linear
+    @ModuleInfo public var w2: Linear
+    @ModuleInfo public var w3: Linear
 
     public init(dim: Int, hiddenDim: Int, multipleOf: Int = 256, ffnDimMultiplier: Float? = nil) {
         var h = Int(2.0 * Float(hiddenDim) / 3.0)
@@ -39,9 +39,9 @@ public final class FeedForwardSwiGLU: Module, @unchecked Sendable {
 
         self.dim = dim
         self.hiddenDim = h
-        self.w1 = Linear(dim, h, bias: false)
-        self.w2 = Linear(h, dim, bias: false)
-        self.w3 = Linear(dim, h, bias: false)
+        self._w1.wrappedValue = Linear(dim, h, bias: false)
+        self._w2.wrappedValue = Linear(h, dim, bias: false)
+        self._w3.wrappedValue = Linear(dim, h, bias: false)
         super.init()
     }
 

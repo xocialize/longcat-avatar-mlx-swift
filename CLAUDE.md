@@ -4,8 +4,10 @@ Operational orientation for Claude when working in this repo.
 
 ## What this is
 
-Swift port of [LongCat-Video-Avatar-1.5](https://github.com/meituan-longcat/LongCat-Video)
-using [mlx-swift](https://github.com/ml-explore/mlx-swift). The
+Swift port of [LongCat-Video-Avatar](https://github.com/meituan-longcat/LongCat-Video),
+currently 1.6, using [mlx-swift](https://github.com/ml-explore/mlx-swift), plus the MLXEngine
+`ModelPackage` over it (`Sources/MLXLongCatAvatar`) that the Gaea plugin
+(`gaea-plugin-longcat-avatar`) serves. The
 **production reference is the Python port at
 [xocialize/longcat-avatar-mlx](https://github.com/xocialize/longcat-avatar-mlx)**
 — same MLX runtime, same HF weights, same outputs. When in doubt about
@@ -24,14 +26,28 @@ model behavior, the Python port is the oracle.
 - **[Tests/](Tests/)** — smoke + parity. Parity tests compare against
   the Python port's reference outputs (frame dumps in `/tmp/q*_smoke_output.npy`
   if available) or against `transformers` PT when small enough.
-- **[docs/port-roadmap.md](docs/port-roadmap.md)** — Stage 3 plan, what's
-  done vs pending.
+- **[Sources/MLXLongCatAvatar/](Sources/MLXLongCatAvatar/)** — the engine package and its
+  configuration. Its offline gates are `Tests/MLXLongCatAvatarTests`.
+- **[docs/port-roadmap.md](docs/port-roadmap.md)** — the original Stage 3 plan (1.5), kept as history.
+- **[docs/footprints.md](docs/footprints.md)** — the memory and speed measurements behind the
+  package's declared footprints.
 
 ## Running tests
 
 ```bash
-swift test            # smoke + any parity tests with bundled fixtures
+swift test            # smoke + package gates; parity tests skip without weights
+LONGCAT_AVATAR_V16_DIR=<converted 1.6 bf16 dir> swift test --filter AvatarV16Parity
 ```
+
+## Three traps this port has already paid for
+
+- **Weight loads ride the CPU stream** (`WeightLoader.loadSafetensors`). A lazy multi-GB
+  load evaluated on the GPU stream holds one Metal command buffer past the ~10 s watchdog,
+  which is fatal and uncatchable.
+- **Dense attention is query-sliced** (`SlicedAttention`). 32 heads × 37,000² scores is
+  ~87 GB at 480p × 93 frames.
+- **The VAE is evaluated one latent frame at a time.** Left lazy, decode holds every frame's
+  full-resolution feature maps at once (+38 GB measured).
 
 ## Skill in use
 

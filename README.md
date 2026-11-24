@@ -1,145 +1,177 @@
 # longcat-avatar-mlx-swift
 
-Swift port of [LongCat-Video-Avatar-1.5](https://github.com/meituan-longcat/LongCat-Video) —
-Meituan's audio-driven video diffusion model — using
-[mlx-swift](https://github.com/ml-explore/mlx-swift) for inference on
-Apple Silicon.
+Swift port of [LongCat-Video-Avatar](https://github.com/meituan-longcat/LongCat-Video) —
+Meituan's audio-driven talking-avatar video diffusion model — on
+[mlx-swift](https://github.com/ml-explore/mlx-swift), for Apple Silicon. A reference image,
+speech and a scene prompt make a 25 fps clip in which the person in the image speaks, with the
+speech as its soundtrack.
 
-> **Status: components ported and parity-tested; end-to-end inference landing (S3.9).**
-> All four model components + the pipeline are implemented and pass parity against the
-> Python-MLX reference. The CLI (`run-inference`) currently runs from **pre-processed
-> `.npy` inputs** and writes a `.npy` tensor; the high-level image/audio/prompt → MP4
-> convenience path is still being wired (see `docs/port-roadmap.md`). Per-file
-> `TODO(S3.x)` headers track what remains.
+**Current: [LongCat-Video-Avatar 1.6](https://huggingface.co/meituan-longcat/LongCat-Video-Avatar-1.6).**
 
-## Parity vs Python-MLX
+Three things are in the package:
 
-| Component | Parity max_abs | Threshold | Notes |
-|---|---|---|---|
-| Wan VAE encode | **3.1e-6** | 1e-4 | fp32 throughout |
-| Wan VAE decode | **1.76e-3** | 5e-3 | bf16, .cpu-stream attention |
-| umT5-XXL | **0.119** | 0.15 | manual matmul+softmax |
-| Whisper-large-v3 | **0.016** | 0.15 | fused SDPA |
-| Base DiT (48 blocks) | **0.033** | 0.1 | fused SDPA |
-| Avatar DiT (full) | **0.32** | 0.5 | + audio path |
-| **End-to-end pipeline** | **0.23** | 5.0 | 8 DMD steps × 3-pass CFG + VAE encode/decode |
+| Product | What |
+|---|---|
+| `LongCatVideoAvatar` | The model and pipeline, plus image / audio / prompt input and MP4 output. |
+| `MLXLongCatAvatar` | An [MLXEngine](https://github.com/xocialize/mlx-engine-swift) `textToVideo` `ModelPackage` over it. |
+| `run-inference` | A CLI: image + speech + prompt → MP4, and the parity mode the tests use. |
 
-Modules using `MLXFast.scaledDotProductAttention` are ~10× tighter against
-Python-MLX than modules with manual matmul+softmax chains.
+The Python port, [xocialize/longcat-avatar-mlx](https://github.com/xocialize/longcat-avatar-mlx),
+is the reference: it converts the weights and its outputs are what this port is gated against.
 
-## What this is
+## What 1.6 is
 
-A Swift Package providing `LongCatVideoAvatar` — the same model the Python
-port runs, packaged so you can call it from a SwiftUI / AppKit app on
-macOS, iOS, or visionOS without bridging through Python. The four published HF
-variants ([mlx-community collection](https://huggingface.co/collections/mlx-community/longcat-video-avatar-15-mlx-6a185d1af4a43074d882e375))
-are consumed verbatim — no Swift-specific re-conversion.
+1.6 keeps 1.5's architecture (a 13.6 B-parameter DiT with an audio cross-attention path, the
+Wan 2.1 VAE, umT5-XXL, a Whisper-large-v3 encoder) and ships a new base DiT with two
+distillation LoRAs, DMD and OPSD, which are switched **during** the 8-step denoise: by
+upstream's documented default, steps 1–4 run DMD and steps 5–8 run OPSD. A merge cannot
+express that, so the LoRAs run as side-paths, as they do upstream:
+`base(x) + up(down(x)) * multiplier * alphaScale` (`Utilities/LoRA.swift`). The side-path also
+rides a quantized base. Sampling is distilled without classifier-free guidance: one DiT pass
+per step.
 
-## Library API
+A clip is a chain of segments. The first is 93 frames (3.72 s) from the image, which is its
+first frame. Each further one continues from the last 13 frames of the one before, with the
+image's latent as a reference, and adds 80 frames (3.2 s).
+
+The output size follows the image: upstream's 480p bucket closest to its aspect ratio
+(832×480 for 16:9, 480×832 for 9:16, 640×608 near square), the image scaled to cover it and
+centre-cropped.
+
+## CLI
+
+```bash
+swift run -c release run-inference \
+    --weights-dir /path/to/LongCat-Video-Avatar-1.6-bf16 \
+    --image portrait.png --audio speech.wav \
+    --prompt "A woman speaks to the camera in a sunlit kitchen" \
+    --out clip.mp4
+```
+
+- The clip is the speech's length unless `--clip-frames` says otherwise (25 fps, at least 25).
+- `--clip-width` / `--clip-height` name a size instead of taking the image's bucket;
+  `--resolution 720p` uses upstream's 720p bucket table.
+- `--mix-steps` / `--mix-alpha` change the LoRA schedule; `--seed` the noise.
+- `--repo` loads a converted repo from the Hub instead of `--weights-dir`.
+- Give clean speech: upstream's vocal separator is not ported.
+
+Parity mode (`--input-dir <fixtures> --reference <output.npy>`) runs the pipeline on
+pre-computed `.npy` inputs and compares with a Python-MLX output.
+
+## Library
 
 ```swift
 import LongCatVideoAvatar
 
-let pipeline = try await LongCatAvatarPipeline.fromPretrained(
-    "mlx-community/LongCat-Video-Avatar-1.5-q4-dmd-merged"
-)
+let pipeline = try LongCatAvatarPipeline.fromDirectory(weightsDirectory)
+let tokenizer = try await AutoTokenizer.from(modelFolder: weightsDirectory.appendingPathComponent("tokenizer"))
+let (embeds, mask) = PromptEncoding.encode(prompt, encoder: pipeline.textEncoder!, tokenizer: tokenizer)
+let text = LongCatAvatarPipeline.TextConditioning(
+    embeds: embeds, mask: mask, uncondEmbeds: MLXArray.zeros(like: embeds), uncondMask: mask)
 
-let video = try await pipeline(
-    image: …, audio: …, prompt: "A western man stands on stage…"
-)
+let plan = try await pipeline.generateMP4(
+    image: try ImageInput.decode(imageData), speechURL: speechURL, text: text, output: outputURL)
 ```
 
-(`LongCatAvatarPipeline.fromPretrained(_:)` and `callAsFunction` are implemented in
-`Sources/LongCatVideoAvatar/Pipeline/LongCatAvatarPipeline.swift`.)
+`generateClip` hands each segment's frames to a closure instead of writing a file;
+`generateAI2V` and `generateAVC` are the two segment kinds; `onStep` reports progress and may
+throw to stop a run.
 
-## CLI (`run-inference`)
+## MLXEngine package
 
-The CLI mirrors the Python `run_inference.py` numerics path. It loads weights from an HF
-repo and runs the pipeline on **pre-processed `.npy` inputs** in a directory, writing the
-generated video tensor as `.npy`:
+`LongCatAvatarPackage` serves `textToVideo`: `T2VRequest.initImage` (the person) and
+`initAudio` (the speech) are both required, `prompt` describes the scene.
+
+- `numFrames` sets the length (default: the speech's); `width` and `height` name a bucket
+  (default: the image's); `includeAudio: false` gives a silent clip; `seed` as usual.
+- `steps`, `guidanceScale`, `negativePrompt`, `fps` other than 25, reference images, keyframes
+  and adapters are refused with a reason.
+- Lanes: `LongCatAvatarConfiguration(quant:)` is `.bf16`, `.int8` or `.int4` (the DiT's
+  precision; everything else is bf16). Each lane is one repo,
+  `mlx-community/LongCat-Video-Avatar-1.6-{bf16,q8,q4}`, or a local `modelDirectory`.
+- umT5-XXL (11 GB) is loaded per request and evicted before denoising; the last prompt's
+  features are kept.
+- Progress is `RunProgress(.denoise)` per step over the whole clip; cancellation is checked
+  before every step.
+
+## Weights
+
+Converted by the Python port's recipe, one directory (or repo) per DiT precision:
 
 ```bash
-swift run run-inference \
-    --repo mlx-community/LongCat-Video-Avatar-1.5-q4-dmd-merged \
-    --input-dir ./fixtures \
-    --frames 5 --height 64 --width 64 --seed 0 \
-    --out output.npy
+python -m recipes.convert_longcat_avatar --variant v1.6-bf16 --out ./weights   # or v1.6-q8, v1.6-q4
 ```
 
-Flags: `--repo` (default `…bf16-dmd-merged`), `--input-dir` (required), `--frames`,
-`--height`, `--width`, `--seed`, `--out`. The `--input-dir` must contain the pre-processed
-`.npy` tensors (image / audio mel / text embeds / initial noise) the pipeline expects.
+| Directory | What | dtype |
+|---|---|---|
+| `dit/` | the 1.6 base DiT, no LoRA merged | bf16, or 8-bit / 4-bit Linears |
+| `lora/` | `dmd_lora.safetensors` (upstream `loraA`), `opsd_lora.safetensors` (`loraB`) | bf16 |
+| `text_encoder/`, `tokenizer/` | umT5-XXL | bf16 |
+| `audio_encoder/` | Whisper-large-v3 encoder | bf16 |
+| `vae/` | Wan 2.1 VAE | bf16 |
+| `pipeline_config.json` | the LoRA schedule | |
 
-## Project layout
+The 1.5 `-dmd-merged` repos still load (`LongCatAvatarPipeline.fromPretrained`); they carry no
+`pipeline_config.json` LoRA block, so no side-paths are attached.
 
-The Swift `Sources/LongCatVideoAvatar/` tree mirrors the Python package, so a reader can
-diff the two trees and see only PT-MLX-Python ↔ Swift-MLX op substitutions.
+## Speed and memory
+
+M5 Max, 128 GB, macOS 27.3, mlx-swift 0.33.1, release build. See `docs/footprints.md` for the
+runs.
+
+One full segment (93 frames, 3.72 s) at 768×512, through the engine package:
+
+| Lane | Weights | Resident | Peak | Time |
+|---|---|---|---|---|
+| bf16 | 46 GB | 37.8 GB | 57.7 GB | 9.4 min |
+| int8 | 33 GB | 23.8 GB | 43.9 GB | 10.4 min |
+| int4 | 26 GB | 16.3 GB | 36.3 GB | 10.4 min |
+
+- A longer clip is more segments: add about 9 minutes per 3.2 s. The peak does not grow with length.
+- Smaller sizes are much faster: 50 frames at 432×256 take 52 s (5.5 s per step).
+- The quantized lanes are not faster here; they are for Macs without the memory.
+- Prepare is 5 s on a warm file cache.
+
+## Parity against Python-MLX
+
+| Gate | Result | Notes |
+|---|---|---|
+| LoRA terms, fp32, real DMD and OPSD files, six target modules | exact on the CPU stream; within 0.1 % as the runtime side-path | The other LoRA's term is 60–130 % away, so a swapped file or a wrong split order cannot pass. |
+| Pipeline, bf16, 5 frames at 64×64, default schedule | mean abs 0.0059 to Python's default-schedule output, 0.0078 to its all-DMD output | bf16 kernels drift between the bindings by as much as the LoRA switch changes this tiny clip (max abs 0.14 either way), so the gate is relative. |
+| Pipeline, DMD on all 8 steps | mean abs 0.0051 to Python's all-DMD output, 0.0081 to its default | The other way round, as it should be. |
+| Components (1.5 weights, opt-in) | VAE encode 3.1e-6, decode 1.76e-3; umT5 0.119; Whisper 0.016; base DiT 0.033; Avatar DiT 0.32 | Unchanged by 1.6: the architecture is the same. |
+
+## Tests
+
+```bash
+swift test                                                              # 147 tests, no weights
+LONGCAT_AVATAR_V16_DIR=/path/to/LongCat-Video-Avatar-1.6-bf16 swift test --filter AvatarV16Parity
+```
+
+`MLXLongCatAvatarTests` are the engine package's offline gates: materialization, licence,
+footprints, cancellation, request checking and clip planning.
+
+## Layout
 
 ```
 Sources/LongCatVideoAvatar/
-├── Models/
-│   ├── AutoencoderKLWan.swift          # Wan 2.1 VAE
-│   ├── UMT5EncoderModel.swift          # umT5-XXL text encoder
-│   ├── WhisperEncoder.swift            # Whisper-Large-v3 encoder
-│   ├── LongCatVideoDiT.swift           # base 48-block DiT
-│   ├── Attention.swift                 # 3D self-attn + text cross-attn
-│   ├── Blocks.swift                    # PatchEmbed3D, TimestepEmbedder, SwiGLU
-│   ├── RoPE3D.swift                    # 3D + 1D RoPE
-│   └── Avatar/                         # Avatar 1.5 overlay
-│       ├── AvatarAttention.swift
-│       ├── AvatarBlocks.swift
-│       └── LongCatVideoDiTAvatar.swift
-├── Pipeline/
-│   ├── LongCatAvatarPipeline.swift     # 4-component orchestration
-│   ├── Guidance.swift                  # 3-pass disentangled CFG + DMD sigmas
-│   └── FlowMatchEulerDiscreteScheduler.swift  # DMD-distilled flow-match scheduler
-├── Audio/
-│   └── AudioProcess.swift              # Whisper post-process + mel via vDSP
-└── Utilities/
-    ├── WeightLoader.swift              # HF Hub download + cache + quant detect
-    └── LoRA.swift                      # DMD LoRA (only for legacy bf16 base)
-
-Sources/RunInference/RunInference.swift  # CLI (.npy in → .npy out)
-Tests/LongCatVideoAvatarTests/{Smoke,Parity}/  (+ Resources/ .npy fixtures)
+├── Models/                 # Wan VAE, umT5, Whisper encoder, base DiT, attention, RoPE
+│   └── Avatar/             # the Avatar DiT: audio cross-attention, AudioProjModel
+├── Pipeline/               # LongCatAvatarPipeline, guidance, scheduler
+├── Media/                  # image / audio / prompt input, size buckets, clip planning, MP4 writer
+├── Audio/AudioProcess.swift
+└── Utilities/              # WeightLoader, LoRA (merge math + runtime side-paths + schedule)
+Sources/MLXLongCatAvatar/   # the MLXEngine ModelPackage
+Sources/RunInference/       # the CLI
 ```
 
-## Platforms
+File names mirror the Python package so the two trees can be read side by side.
 
-`Package.swift` targets macOS 14, iOS 17, visionOS 1. Dependencies: `mlx-swift`
-(≥0.21.0), `swift-transformers` (≥0.1.18), `swift-argument-parser` (≥1.3.0).
+## Requirements
 
-| Platform | Min version | Practical use |
-|---|---|---|
-| macOS | 14 | Library + CLI, full 480p inference on M-series 64 GB+ |
-| iOS | 17 | Library only; only q4-merged is realistic on iPad Pro 16 GB |
-| visionOS | 1 | Library only; same RAM caveats as iOS |
-
-## Running tests
-
-```bash
-# Recommended: xcodebuild bundles MLX's default.metallib correctly.
-xcodebuild test -scheme LongCatVideoAvatar-Package -destination "platform=macOS"
-```
-
-> **Heads-up:** `swift test` from the CLI does **not** bundle MLX's Metal shader
-> library — the test binary crashes on first kernel dispatch with
-> "Failed to load the default metallib / library not found". Use `xcodebuild test`.
-
-## Companion Python port
-
-[xocialize/longcat-avatar-mlx](https://github.com/xocialize/longcat-avatar-mlx)
-is the production reference (oracle for behavior; 70 smoke tests + opt-in PT parity).
-Both ports consume the same four published HF variants:
-
-| Variant | DiT dtype | Disk | 29-frame @ 256×432 |
-|---|---|---|---|
-| [`bf16-dmd-merged`](https://huggingface.co/mlx-community/LongCat-Video-Avatar-1.5-bf16-dmd-merged) | bf16 | 43 GB | ~105 s (Python) |
-| [`bf16`](https://huggingface.co/mlx-community/LongCat-Video-Avatar-1.5-bf16) | bf16 + LoRA | 46 GB | ~105 s (Python) |
-| [`q4-dmd-merged`](https://huggingface.co/mlx-community/LongCat-Video-Avatar-1.5-q4-dmd-merged) | 4-bit | 24 GB | ~102 s (Python) |
-| [`q8-dmd-merged`](https://huggingface.co/mlx-community/LongCat-Video-Avatar-1.5-q8-dmd-merged) | 8-bit | 31 GB | ~151 s (Python) |
-
-Swift wall-clock numbers will be filled in once the end-to-end path (S3.9) lands.
+macOS 26 or later, Apple Silicon. The package pins the fleet's mlx-swift fork
+(`xocialize/mlx-swift` 0.33.1: upstream 0.33.0 with the split-head attention routes off).
 
 ## License
 
-MIT. Matches upstream Meituan LongCat-Video and the Python port.
+MIT, as upstream Meituan LongCat-Video and the Python port are.

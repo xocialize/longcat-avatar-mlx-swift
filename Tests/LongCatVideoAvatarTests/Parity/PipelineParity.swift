@@ -58,7 +58,12 @@ final class PipelineParity: XCTestCase {
     /// only because the pipeline call site needs to read `xEmbedder.proj.weight`
     /// which is the same in both classes.
     private func loadFullPipeline() async throws -> LongCatAvatarPipeline {
-        try await LongCatAvatarPipeline.fromPretrained(Self.repoID)
+        // The 1.5 fixture was generated with the 3-pass CFG at 4.0 / 4.0 (the
+        // port's default before it followed upstream's no-CFG distilled path).
+        var config = PipelineConfig()
+        config.textGuidanceScale = 4.0
+        config.audioGuidanceScale = 4.0
+        return try await LongCatAvatarPipeline.fromPretrained(Self.repoID, config: config)
     }
 
     func testEndToEndMatchesPythonMLX() async throws {
@@ -83,7 +88,7 @@ final class PipelineParity: XCTestCase {
         XCTAssertEqual(pythonOutput.shape, [1, 3, 5, 64, 64])
 
         print("  Running Swift pipeline (this can take 30-90s)...")
-        let swiftOutput = pipeline(
+        let swiftOutput = try pipeline(
             image: image,
             audioMel: audioMel,
             textEmbeds: textEmbeds,
@@ -94,7 +99,7 @@ final class PipelineParity: XCTestCase {
             height: 64,
             width: 64,
             seed: 0,
-            initialNoise: initialNoise
+            initialNoise: [initialNoise]
         )
 
         XCTAssertEqual(swiftOutput.shape, pythonOutput.shape, "Pipeline output shape diverged")
